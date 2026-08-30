@@ -1,1 +1,1 @@
-fs is not defined
+/// <reference types="vite/client" />
