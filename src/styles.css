@@ -75,6 +75,19 @@ body { margin: 0; min-width: 320px; }
 .add-actions { display: flex; flex-wrap: wrap; }
 .gantt-title { height: 61px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px; border-bottom: 1px solid #d9e1ea; }
 .gantt-title span { color: #607086; font-size: 13px; }
+.view-switch { display: inline-flex; padding: 3px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+.view-switch button { padding: 6px 12px; border: 0; border-radius: 6px; color: #475569; background: transparent; cursor: pointer; }
+.view-switch button.active { color: white; background: #2563eb; }
+.month-calendar { min-width: 910px; padding: 12px; background: #cbd5e1; }
+.calendar-weekday-row, .calendar-date-row, .calendar-bars { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.calendar-weekday { padding: 9px; color: #334155; background: #e2e8f0; font-weight: 700; text-align: center; }
+.calendar-week { margin-top: 1px; background: white; }
+.calendar-day { min-height: 44px; padding: 8px; border-right: 1px solid #e2e8f0; background: white; }
+.calendar-day.weekend { background: #f8fafc; }
+.calendar-date { margin-bottom: 7px; color: #475569; font-size: 13px; font-weight: 700; }
+.calendar-bars { align-items: start; min-height: 66px; padding: 4px 0 10px; row-gap: 5px; background: linear-gradient(to right, transparent calc(100% - 1px), #e2e8f0 calc(100% - 1px)); background-size: calc(100% / 7) 100%; }
+.calendar-task { z-index: 1; margin: 0 4px; padding: 6px 9px; overflow: hidden; border-left: 3px solid #2563eb; border-radius: 4px; color: #1e3a8a; background: #dbeafe; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.calendar-task.completed { border-color: #94a3b8; color: #64748b; background: #e2e8f0; text-decoration: line-through; }
 .calendar-axis { height: 76px; border-bottom: 1px solid #d9e1ea; }
 .week-axis { display: grid; height: 32px; background: #edf3fa; }
 .week-axis span { display: grid; place-items: center; border-right: 2px solid #94a3b8; color: #334155; font-size: 12px; font-weight: 600; }
@@ -99,6 +112,10 @@ body { margin: 0; min-width: 320px; }
 .parent-settings h3 { margin: 0 0 10px; font-size: 15px; }
 .parent-settings label { display: grid; grid-template-columns: 1fr 130px; align-items: center; gap: 12px; padding: 7px 0; }
 .parent-settings select { padding: 7px 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; }
+.data-tools { margin-top: 18px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
+.data-tools h3 { margin: 0 0 6px; font-size: 15px; }
+.data-tools > div { display: flex; gap: 8px; flex-wrap: wrap; }
+.data-tools button { padding: 8px 11px; border: 1px solid #cbd5e1; border-radius: 7px; background: white; cursor: pointer; }
 .shortcut-help { margin: 18px 0; border-top: 1px solid #e2e8f0; padding-top: 14px; }
 .shortcut-help summary { cursor: pointer; font-weight: 600; }
 .shortcut-help dl { margin: 12px 0 0; }
