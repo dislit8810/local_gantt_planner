@@ -55,3 +55,13 @@
 - Show the keyboard shortcut reference inside the project settings dialog.
 - Support multiple level-zero title tasks in one workspace and collapse or expand all descendants with a disclosure button.
 - Implement task creation and continuous `Enter` entry first, then hierarchy and reorder shortcuts.
+
+
+## Required data compatibility policy
+
+- Every new version must continue to read tasks and settings saved by previous versions.
+- When adding saved fields, supply safe defaults when older data does not contain those fields.
+- When renaming fields, changing types, changing hierarchy, or changing storage keys, implement an automatic migration from the old format before releasing the change.
+- Never remove or rename an existing storage key without a migration path.
+- If loading fails, do not overwrite and destroy the existing saved data. Preserve it and provide a safe fallback or recovery path.
+- Before each release, test loading, updating, and saving data created by the immediately previous version.
