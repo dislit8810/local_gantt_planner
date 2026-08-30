@@ -14,6 +14,13 @@ export type Task = {
   collapsed?: boolean
 }
 
+type BackupPayload = {
+  schemaVersion: 1
+  exportedAt: string
+  tasks: Task[]
+  settings: { parallel: boolean; projectsParallel: boolean; startDate: string }
+}
+
 const rememberedDayValue = (task: Task) => task.dayValue ?? (task.unit === 'day' && task.days > 0 ? task.days : 1)
 const rememberedWeekValue = (task: Task) => task.weekValue ?? (task.unit === 'week' && task.days > 0 ? task.days / 5 : 1)
 const tasksStorageKey = 'schedule-app.tasks.v1'
@@ -70,8 +77,10 @@ export default function App() {
   const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null)
   const [durationEditingId, setDurationEditingId] = useState<number | null>(null)
   const [durationDraft, setDurationDraft] = useState('')
+  const [viewMode, setViewMode] = useState<'gantt' | 'calendar'>('gantt')
   const inputRef = useRef<HTMLInputElement>(null)
   const durationRef = useRef<HTMLInputElement>(null)
+  const importRef = useRef<HTMLInputElement>(null)
   const schedule = useMemo(() => calculateSchedule(taskItems, parallel, projectsParallel, startDate), [taskItems, parallel, projectsParallel, startDate])
   const weekStartIndexes = useMemo(() => {
     let total = 0
@@ -96,6 +105,79 @@ export default function App() {
     return true
   })
   const visibleTaskIds = new Set(visibleTasks.map((task) => task.id))
+  const calendarDays = useMemo(() => {
+    const first = new Date(`${schedule.isoDates[0]}T00:00:00`)
+    const last = new Date(`${schedule.isoDates.at(-1)}T00:00:00`)
+    first.setDate(first.getDate() - first.getDay())
+    last.setDate(last.getDate() + 6 - last.getDay())
+    const days: Date[] = []
+    for (const date = new Date(first); date <= last; date.setDate(date.getDate() + 1)) days.push(new Date(date))
+    return days
+  }, [schedule.isoDates])
+  const calendarWeeks = useMemo(() => Array.from({ length: Math.ceil(calendarDays.length / 7) }, (_, index) => {
+    const days = calendarDays.slice(index * 7, index * 7 + 7)
+    const keys = days.map((date) => {
+      const year = date.getFullYear()
+      const month = String(date.getMonth() + 1).padStart(2, '0')
+      const day = String(date.getDate()).padStart(2, '0')
+      return `${year}-${month}-${day}`
+    })
+    const segments = schedule.rows.filter((row) => {
+      if (!visibleTaskIds.has(row.id)) return false
+      if (!row.parent) return true
+      return taskItems.find((task) => task.id === row.id)?.collapsed === true
+    }).flatMap((row) => {
+      const activeKeys = new Set(schedule.isoDates.slice(Math.floor(row.start), Math.min(schedule.isoDates.length, Math.ceil(row.start + row.days))))
+      const activeColumns = keys.map((key, column) => activeKeys.has(key) ? column : -1).filter((column) => column >= 0)
+      if (activeColumns.length === 0) return []
+      const first = activeColumns[0]
+      const last = activeColumns.at(-1)!
+      return [{ task: row, start: first + 1, span: last - first + 1 }]
+    })
+    return { days, segments }
+  }), [calendarDays, schedule, taskItems, visibleTasks])
+
+  const exportBackup = () => {
+    const payload: BackupPayload = {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      tasks: taskItems,
+      settings: { parallel, projectsParallel, startDate },
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `schedule-app-backup-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const importBackup = async (file: File) => {
+    try {
+      const payload = JSON.parse(await file.text()) as BackupPayload
+      if (payload.schemaVersion !== 1 || !Array.isArray(payload.tasks)) throw new Error('対応していないバックアップ形式です。')
+      if (!confirm('現在のタスクと設定を、選択したバックアップで置き換えますか？')) return
+      const normalized = payload.tasks.map((task) => ({
+        ...task,
+        dayValue: rememberedDayValue(task),
+        weekValue: rememberedWeekValue(task),
+        completed: task.completed ?? false,
+      }))
+      setTaskItems(normalized)
+      setParallel(payload.settings?.parallel ?? true)
+      setProjectsParallel(payload.settings?.projectsParallel ?? false)
+      setStartDate(payload.settings?.startDate ?? '2026-09-01')
+      setEditingId(null)
+      setDurationEditingId(null)
+      setSelectedId(null)
+      setSelectedTaskIds(new Set())
+      alert('バックアップを読み込みました。')
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'バックアップを読み込めませんでした。')
+    } finally {
+      if (importRef.current) importRef.current.value = ''
+    }
+  }
 
   useEffect(() => {
     setTaskItems((current) => current.map((task) => ({
@@ -572,32 +654,64 @@ export default function App() {
           <div className="add-actions"><button className="add-task" type="button" onClick={addTitleTask}>＋ プロジェクト追加</button><button className="add-task" type="button" onClick={addRootTask}>＋ タスク追加</button></div>
         </div>
         <div className="gantt-panel">
-          <div className="gantt-title"><strong>ガントチャート</strong><span>土日を除外</span></div>
-          <div className="calendar-axis" style={{ width: timelineWidth }}>
-            <div className="week-axis" style={{ gridTemplateColumns: schedule.weeks.map((week) => `${week.days}fr`).join(' ') }}>
-              {schedule.weeks.map((week) => <span key={week.label}>{week.label}</span>)}
-            </div>
-            <div className="date-axis" style={{ gridTemplateColumns: `repeat(${schedule.workdays.length}, 1fr)` }}>
-              {schedule.workdays.map((date, index) => <span className={weekStartIndexes.has(index) ? 'week-start' : ''} key={`${date}-${index}`}>{date}</span>)}
+          <div className="gantt-title">
+            <strong>{viewMode === 'gantt' ? 'ガントチャート' : 'カレンダー'}</strong>
+            <div className="view-switch" aria-label="表示方法">
+              <button className={viewMode === 'gantt' ? 'active' : ''} type="button" onClick={() => setViewMode('gantt')}>ガント</button>
+              <button className={viewMode === 'calendar' ? 'active' : ''} type="button" onClick={() => setViewMode('calendar')}>カレンダー</button>
             </div>
           </div>
-          {schedule.rows.filter((item) => visibleTaskIds.has(item.id)).map((item) => (
-            <div className="gantt-row" key={item.id} style={{ '--columns': schedule.workdays.length, width: timelineWidth } as React.CSSProperties}>
-              {[...weekStartIndexes].map((index) => (
-                <span className="week-line" key={index} style={{ left: `${(index / schedule.workdays.length) * 100}%` }} />
-              ))}
-              <div
-                className={`gantt-bar${item.parent ? ' parent-bar' : ''}${item.completed ? ' completed' : ''}`}
-                style={{
-                  left: `${(item.start / schedule.workdays.length) * 100}%`,
-                  width: `${(item.days / schedule.workdays.length) * 100}%`,
-                }}
-                aria-label={`${item.name}、${item.days}営業日`}
-              >
-                {!item.parent && item.name}
+          {viewMode === 'gantt' ? (
+            <>
+              <div className="calendar-axis" style={{ width: timelineWidth }}>
+                <div className="week-axis" style={{ gridTemplateColumns: schedule.weeks.map((week) => `${week.days}fr`).join(' ') }}>
+                  {schedule.weeks.map((week) => <span key={week.label}>{week.label}</span>)}
+                </div>
+                <div className="date-axis" style={{ gridTemplateColumns: `repeat(${schedule.workdays.length}, 1fr)` }}>
+                  {schedule.workdays.map((date, index) => <span className={weekStartIndexes.has(index) ? 'week-start' : ''} key={`${date}-${index}`}>{date}</span>)}
+                </div>
               </div>
+              {schedule.rows.filter((item) => visibleTaskIds.has(item.id)).map((item) => (
+                <div className="gantt-row" key={item.id} style={{ '--columns': schedule.workdays.length, width: timelineWidth } as React.CSSProperties}>
+                  {[...weekStartIndexes].map((index) => (
+                    <span className="week-line" key={index} style={{ left: `${(index / schedule.workdays.length) * 100}%` }} />
+                  ))}
+                  <div
+                    className={`gantt-bar${item.parent ? ' parent-bar' : ''}${item.completed ? ' completed' : ''}`}
+                    style={{
+                      left: `${(item.start / schedule.workdays.length) * 100}%`,
+                      width: `${(item.days / schedule.workdays.length) * 100}%`,
+                    }}
+                    aria-label={`${item.name}、${item.days}営業日`}
+                  >
+                    {!item.parent && item.name}
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : (
+            <div className="month-calendar">
+              <div className="calendar-weekday-row">
+                {['日', '月', '火', '水', '木', '金', '土'].map((day) => <div className="calendar-weekday" key={day}>{day}</div>)}
+              </div>
+              {calendarWeeks.map((week, weekIndex) => (
+                <div className="calendar-week" key={weekIndex}>
+                  <div className="calendar-date-row">
+                    {week.days.map((date) => (
+                      <div className={`calendar-day${date.getDay() === 0 || date.getDay() === 6 ? ' weekend' : ''}`} key={date.toISOString()}>
+                        <div className="calendar-date">{date.getMonth() + 1}/{date.getDate()}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="calendar-bars">
+                    {week.segments.map(({ task, start, span }) => (
+                      <div className={`calendar-task${task.completed ? ' completed' : ''}`} key={task.id} style={{ gridColumn: `${start} / span ${span}` }} title={task.name}>{task.name}</div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       </section>
       {settingsOpen && (
@@ -645,6 +759,15 @@ export default function App() {
                 ))}
               </div>
             )}
+            <div className="data-tools">
+              <h3>バックアップ</h3>
+              <p className="setting-note">タスクと設定をJSONファイルに保存・復元します。</p>
+              <div>
+                <button type="button" onClick={exportBackup}>JSONをエクスポート</button>
+                <button type="button" onClick={() => importRef.current?.click()}>JSONをインポート</button>
+                <input ref={importRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importBackup(file) }} />
+              </div>
+            </div>
             <details className="shortcut-help">
               <summary>キーボードショートカット</summary>
               <dl>
