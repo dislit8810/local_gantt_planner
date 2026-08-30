@@ -1,1 +1,6 @@
-fs is not defined
+node_modules
+dist
+.vite
+.pnpm-store
+*.tsbuildinfo
+*.log
