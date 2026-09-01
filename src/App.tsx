@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { calculateSchedule } from './schedule'
 
 export type Task = {
@@ -12,6 +12,7 @@ export type Task = {
   completed?: boolean
   execution?: 'sequence' | 'parallel'
   collapsed?: boolean
+  projectStartDate?: string
 }
 
 type BackupPayload = {
@@ -78,9 +79,11 @@ export default function App() {
   const [durationEditingId, setDurationEditingId] = useState<number | null>(null)
   const [durationDraft, setDurationDraft] = useState('')
   const [viewMode, setViewMode] = useState<'gantt' | 'calendar'>('gantt')
+  const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saved')
   const inputRef = useRef<HTMLInputElement>(null)
   const durationRef = useRef<HTMLInputElement>(null)
   const importRef = useRef<HTMLInputElement>(null)
+  const saveTimerRef = useRef<number | null>(null)
   const schedule = useMemo(() => calculateSchedule(taskItems, parallel, projectsParallel, startDate), [taskItems, parallel, projectsParallel, startDate])
   const weekStartIndexes = useMemo(() => {
     let total = 0
@@ -91,6 +94,7 @@ export default function App() {
   }, [schedule.weeks])
   const timelineWidth = Math.max(720, schedule.workdays.length * 48)
   const parentTasks = taskItems.filter((task, index) => taskItems[index + 1]?.level > task.level)
+  const projectTasks = taskItems.filter((task) => task.level === 0)
   const parentTaskIds = new Set(parentTasks.map((task) => task.id))
   const scheduleById = new Map(schedule.rows.map((row) => [row.id, row]))
   const visibleTasks = taskItems.filter((task, index) => {
@@ -188,12 +192,21 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
-  }, [taskItems])
+    setSaveStatus('saving')
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
+    try {
+      localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
+      localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate }))
+      saveTimerRef.current = window.setTimeout(() => setSaveStatus('saved'), 350)
+    } catch {
+      setSaveStatus('error')
+    }
+    return () => {
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
+    }
+  }, [taskItems, parallel, projectsParallel, startDate])
 
-  useEffect(() => {
-    localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate }))
-  }, [parallel, projectsParallel, startDate])
+  const shortDate = (value?: string) => value ? `${value.slice(5, 7)}/${value.slice(8, 10)}` : '—'
 
   useEffect(() => {
     if (editingId !== null) {
@@ -524,6 +537,9 @@ export default function App() {
       <header className="app-header">
         <h1>Schedule App v0.1</h1>
         <div className="header-actions">
+          <span className={`save-status ${saveStatus}`} title="通常モードとシークレットモードでは保存領域が分かれます">
+            {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? 'このブラウザに保存済み' : '保存できません'}
+          </span>
           <label>
             開始日
           <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
@@ -531,14 +547,19 @@ export default function App() {
           <button className="settings-button" type="button" aria-label="設定を開く" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
       </header>
-      <section className="workspace">
+      <section className={`workspace${viewMode === 'calendar' ? ' calendar-view' : ''}`}>
         <div className="task-panel">
           <div className="task-title"><strong>タスク一覧</strong></div>
-          <div className="panel-heading"><span>タスク</span><span>日数</span></div>
-          {visibleTasks.map((task) => (
+          <div className="panel-heading"><span>タスク</span><span>開始</span><span>終了</span><span>日数</span></div>
+          {visibleTasks.map((task, visibleIndex) => {
+            const isProject = task.level === 0
+            const isParent = parentTaskIds.has(task.id)
+            const nextTask = visibleTasks[visibleIndex + 1]
+            const isProjectEnd = !nextTask || nextTask.level === 0
+            return (
             <div
-              className={`task-row${editingId === task.id ? ' editing' : ''}${selectedTaskIds.has(task.id) ? ' range-selected' : ''}${selectedId === task.id ? ' selected' : ''}${task.completed ? ' completed' : ''}`}
-              style={{ paddingLeft: 18 + task.level * 22 }}
+              className={`task-row in-project${isProject ? ' project-row project-start' : ''}${isProjectEnd ? ' project-end' : ''}${isParent && !isProject ? ' parent-task' : ''}${!isParent ? ' leaf-task' : ''}${editingId === task.id ? ' editing' : ''}${selectedTaskIds.has(task.id) ? ' range-selected' : ''}${selectedId === task.id ? ' selected' : ''}${task.completed ? ' completed' : ''}`}
+              style={{ '--task-level': task.level } as CSSProperties}
               key={task.id}
               onClick={(event) => selectTaskRange(task, event.shiftKey)}
               onKeyDown={(event) => handleSelectedTaskKey(event, task)}
@@ -595,6 +616,8 @@ export default function App() {
                   {task.name}
                 </button>
               )}
+              <span className="task-date">{shortDate(scheduleById.get(task.id)?.startDate)}</span>
+              <span className="task-date">{shortDate(scheduleById.get(task.id)?.endDate)}</span>
               {parentTaskIds.has(task.id) ? (
                 <span className="auto-duration">{scheduleById.get(task.id)?.days ?? 0}日 <small>自動</small></span>
               ) : durationEditingId === task.id ? (
@@ -650,10 +673,11 @@ export default function App() {
               )}
               <button className="delete-task" type="button" aria-label={`${task.name}だけを削除`} onClick={(event) => { event.stopPropagation(); deleteTaskOnly(task) }}>×</button>
             </div>
-          ))}
+            )
+          })}
           <div className="add-actions"><button className="add-task" type="button" onClick={addTitleTask}>＋ プロジェクト追加</button><button className="add-task" type="button" onClick={addRootTask}>＋ タスク追加</button></div>
         </div>
-        <div className="gantt-panel">
+        <div className={`gantt-panel${viewMode === 'calendar' ? ' calendar-mode' : ''}`}>
           <div className="gantt-title">
             <strong>{viewMode === 'gantt' ? 'ガントチャート' : 'カレンダー'}</strong>
             <div className="view-switch" aria-label="表示方法">
@@ -671,7 +695,7 @@ export default function App() {
                   {schedule.workdays.map((date, index) => <span className={weekStartIndexes.has(index) ? 'week-start' : ''} key={`${date}-${index}`}>{date}</span>)}
                 </div>
               </div>
-              {schedule.rows.filter((item) => visibleTaskIds.has(item.id)).map((item) => (
+              {schedule.rows.filter((item) => visibleTaskIds.has(item.id) && item.days > 0).map((item) => (
                 <div className="gantt-row" key={item.id} style={{ '--columns': schedule.workdays.length, width: timelineWidth } as React.CSSProperties}>
                   {[...weekStartIndexes].map((index) => (
                     <span className="week-line" key={index} style={{ left: `${(index / schedule.workdays.length) * 100}%` }} />
@@ -692,13 +716,13 @@ export default function App() {
           ) : (
             <div className="month-calendar">
               <div className="calendar-weekday-row">
-                {['日', '月', '火', '水', '木', '金', '土'].map((day) => <div className="calendar-weekday" key={day}>{day}</div>)}
+                {['日', '月', '火', '水', '木', '金', '土'].map((day, index) => <div className={`calendar-weekday${index === 0 ? ' sunday' : index === 6 ? ' saturday' : ''}`} key={day}>{day}</div>)}
               </div>
               {calendarWeeks.map((week, weekIndex) => (
                 <div className="calendar-week" key={weekIndex}>
                   <div className="calendar-date-row">
                     {week.days.map((date) => (
-                      <div className={`calendar-day${date.getDay() === 0 || date.getDay() === 6 ? ' weekend' : ''}`} key={date.toISOString()}>
+                      <div className={`calendar-day${date.getDay() === 0 ? ' weekend sunday' : date.getDay() === 6 ? ' weekend saturday' : ''}`} key={date.toISOString()}>
                         <div className="calendar-date">{date.getMonth() + 1}/{date.getDate()}</div>
                       </div>
                     ))}
@@ -737,6 +761,22 @@ export default function App() {
               </select>
             </label>
             <p className="setting-note">個別指定がない親タスクに適用されます。</p>
+            {projectTasks.length > 0 && (
+              <div className="project-start-settings">
+                <h3>プロジェクトごとの開始日</h3>
+                <p className="setting-note">未指定の場合は全体の開始日を使います。</p>
+                {projectTasks.map((task) => (
+                  <label key={task.id}>
+                    <span>{task.name}</span>
+                    <input
+                      type="date"
+                      value={task.projectStartDate ?? ''}
+                      onChange={(event) => setTaskItems((current) => current.map((item) => item.id === task.id ? { ...item, projectStartDate: event.target.value || undefined } : item))}
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
             {parentTasks.length > 0 && (
               <div className="parent-settings">
                 <h3>親タスクごとの実行方法</h3>
@@ -762,6 +802,7 @@ export default function App() {
             <div className="data-tools">
               <h3>バックアップ</h3>
               <p className="setting-note">タスクと設定をJSONファイルに保存・復元します。</p>
+              <p className="setting-note">通常モードとシークレットモードは別々に保存されます。別環境へ移すときはJSONバックアップを使ってください。</p>
               <div>
                 <button type="button" onClick={exportBackup}>JSONをエクスポート</button>
                 <button type="button" onClick={() => importRef.current?.click()}>JSONをインポート</button>
