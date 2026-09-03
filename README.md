@@ -55,6 +55,52 @@ npm run dev
 
 保存先が異なるPCでは、`cd` のパスをそのPCの配置場所に変更してください。
 
+## 既存環境を最新版へ更新する
+
+古いバージョンを使用しているPCへ、GitHubの最新版を取り込むときの手順です。
+
+### 1. タスクデータをバックアップする
+
+更新前に、アプリの設定画面からJSONをエクスポートしてください。通常、タスクデータはGit管理外の `data` フォルダに残りますが、更新作業中の誤操作に備えてバックアップを推奨します。
+
+### 2. 起動中のSchedule Appを終了する
+
+通知領域の青い「S」アイコンを右クリックして、`Exit`を選択します。コマンドプロンプトから起動している場合は、起動した画面で `Ctrl + C` を押します。
+
+### 3. GitHubの最新版を取り込む
+
+Gitで取得した既存フォルダでは、PowerShellで次を実行します。
+
+```powershell
+cd "C:\アプリを配置したフォルダ\local_gantt_planner"
+git pull --ff-only origin main
+```
+
+ローカルでソースコードを変更している場合は、先にコミットまたは退避してから更新してください。`data`フォルダ内のタスクデータはGitの更新対象外です。
+
+GitHubからZIPをダウンロードし直す場合は、新しいフォルダへ展開してください。古い環境から `node_modules` と `dist` をコピーせず、必要に応じて `data` フォルダだけをバックアップから移します。
+
+### 4. 古い依存パッケージを入れ直す
+
+古い `node_modules` が残っていると、`Cannot find package` や `ERR_MODULE_NOT_FOUND` が発生する場合があります。PowerShellで次を実行してください。
+
+```powershell
+Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+npm cache verify
+npm install
+npm run build
+```
+
+### 5. 最新版を起動する
+
+`ScheduleAppを起動.vbs` をダブルクリックします。コマンドプロンプトから確認する場合は、次を実行します。
+
+```powershell
+npm run dev
+```
+
+画面が開いたら、以前のタスクデータが読み込めることを確認してください。読み込めない場合は、新しいデータを入力する前に、手順1で保存したJSONを設定画面からインポートします。
+
 ## 動作確認用ビルド
 
 ```powershell
