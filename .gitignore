@@ -4,3 +4,5 @@ dist
 .pnpm-store
 *.tsbuildinfo
 *.log
+data/*.json
+data/*.tmp

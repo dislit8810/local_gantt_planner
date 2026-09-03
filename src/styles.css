@@ -9,8 +9,9 @@
 body { margin: 0; min-width: 320px; }
 
 .app-shell {
-  width: min(1400px, calc(100% - 32px));
-  margin: 32px auto;
+  width: calc(100% - clamp(24px, 3vw, 56px));
+  min-height: calc(100vh - clamp(24px, 3vw, 48px));
+  margin: clamp(12px, 1.5vw, 24px) auto;
   overflow: hidden;
   background: white;
   border: 1px solid #d9e1ea;
@@ -31,7 +32,12 @@ body { margin: 0; min-width: 320px; }
 .header-actions { display: flex; align-items: center; gap: 14px; }
 .settings-button { width: 38px; height: 38px; border: 1px solid #cbd5e1; border-radius: 8px; background: white; font-size: 20px; cursor: pointer; }
 
-.workspace { display: grid; grid-template-columns: minmax(520px, 55%) 1fr; min-height: 420px; }
+.workspace {
+  display: grid;
+  grid-template-columns: clamp(520px, 36vw, 680px) minmax(720px, 1fr);
+  min-height: calc(100vh - 92px);
+  overflow-x: auto;
+}
 .task-panel { padding: 0; }
 .gantt-panel { min-width: 0; overflow-x: auto; }
 .gantt-panel.calendar-mode { overflow: visible; }
@@ -144,6 +150,8 @@ body { margin: 0; min-width: 320px; }
 .date-axis span { display: grid; place-items: center; border-right: 1px solid #e8edf3; color: #607086; font-size: 12px; }
 .date-axis span.week-start { border-left: 2px solid #64748b; }
 .gantt-row { position: relative; height: 44px; border-bottom: 1px solid #e8edf3; background-image: linear-gradient(to right, #e8edf3 1px, transparent 1px); background-size: calc(100% / var(--columns)) 100%; }
+.gantt-row.project-start { margin-top: 12px; border-top: 1px solid #8fa8c5; }
+.gantt-row.project-end { margin-bottom: 12px; border-bottom: 1px solid #8fa8c5; }
 .week-line { position: absolute; z-index: 1; top: 0; bottom: 0; width: 2px; background: #94a3b8; pointer-events: none; }
 .gantt-bar { position: absolute; z-index: 2; top: 9px; height: 26px; display: flex; align-items: center; overflow: hidden; padding: 0 7px; border-radius: 5px; background: #3b82f6; color: white; font-size: 12px; white-space: nowrap; transition: left 180ms ease, width 180ms ease; }
 .gantt-bar.completed { background: #87919f; opacity: .55; }
@@ -180,7 +188,8 @@ body { margin: 0; min-width: 320px; }
 @media (max-width: 680px) {
   .app-header { align-items: flex-start; flex-direction: column; }
   .header-actions { width: 100%; justify-content: space-between; }
-  .workspace { grid-template-columns: 1fr; }
+  .app-shell { width: 100%; min-height: 100vh; margin: 0; border-radius: 0; }
+  .workspace { grid-template-columns: 1fr; min-height: 0; overflow-x: visible; }
   .task-panel { overflow-x: auto; }
   .task-panel { border-right: 0; border-bottom: 1px solid #d9e1ea; }
 }

@@ -80,6 +80,7 @@ export default function App() {
   const [durationDraft, setDurationDraft] = useState('')
   const [viewMode, setViewMode] = useState<'gantt' | 'calendar'>('gantt')
   const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saved')
+  const [sharedDataReady, setSharedDataReady] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const durationRef = useRef<HTMLInputElement>(null)
   const importRef = useRef<HTMLInputElement>(null)
@@ -192,19 +193,83 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    let active = true
+    const loadSharedData = async () => {
+      try {
+        const response = await fetch('/api/state', { cache: 'no-store' })
+        if (!active) return
+        if (response.status === 204) {
+          const seed: BackupPayload = {
+            schemaVersion: 1,
+            exportedAt: new Date().toISOString(),
+            tasks: taskItems,
+            settings: { parallel, projectsParallel, startDate },
+          }
+          const saved = await fetch('/api/state', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(seed),
+          })
+          if (!saved.ok) throw new Error('初期データを保存できませんでした。')
+        } else if (response.ok) {
+          const payload = await response.json() as BackupPayload
+          if (payload.schemaVersion !== 1 || !Array.isArray(payload.tasks)) throw new Error('保存形式が正しくありません。')
+          setTaskItems(payload.tasks.map((task) => ({
+            ...task,
+            dayValue: rememberedDayValue(task),
+            weekValue: rememberedWeekValue(task),
+            completed: task.completed ?? false,
+          })))
+          setParallel(payload.settings?.parallel ?? true)
+          setProjectsParallel(payload.settings?.projectsParallel ?? false)
+          setStartDate(payload.settings?.startDate ?? '2026-09-01')
+        } else {
+          throw new Error('共通データを読み込めませんでした。')
+        }
+        if (active) {
+          setSharedDataReady(true)
+          setSaveStatus('saved')
+        }
+      } catch {
+        if (active) {
+          setSharedDataReady(true)
+          setSaveStatus('error')
+        }
+      }
+    }
+    void loadSharedData()
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (!sharedDataReady) return
     setSaveStatus('saving')
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
-    try {
-      localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
-      localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate }))
-      saveTimerRef.current = window.setTimeout(() => setSaveStatus('saved'), 350)
-    } catch {
-      setSaveStatus('error')
-    }
+    saveTimerRef.current = window.setTimeout(async () => {
+      try {
+        const payload: BackupPayload = {
+          schemaVersion: 1,
+          exportedAt: new Date().toISOString(),
+          tasks: taskItems,
+          settings: { parallel, projectsParallel, startDate },
+        }
+        const response = await fetch('/api/state', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        if (!response.ok) throw new Error('保存に失敗しました。')
+        localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
+        localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate }))
+        setSaveStatus('saved')
+      } catch {
+        setSaveStatus('error')
+      }
+    }, 350)
     return () => {
       if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
     }
-  }, [taskItems, parallel, projectsParallel, startDate])
+  }, [taskItems, parallel, projectsParallel, startDate, sharedDataReady])
 
   const shortDate = (value?: string) => value ? `${value.slice(5, 7)}/${value.slice(8, 10)}` : '—'
 
@@ -537,8 +602,8 @@ export default function App() {
       <header className="app-header">
         <h1>Schedule App v0.1</h1>
         <div className="header-actions">
-          <span className={`save-status ${saveStatus}`} title="通常モードとシークレットモードでは保存領域が分かれます">
-            {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? 'このブラウザに保存済み' : '保存できません'}
+          <span className={`save-status ${saveStatus}`} title="ChromeとCodex内ブラウザで同じローカルデータを使用します">
+            {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '共通データに保存済み' : '共通データに保存できません'}
           </span>
           <label>
             開始日
@@ -695,12 +760,17 @@ export default function App() {
                   {schedule.workdays.map((date, index) => <span className={weekStartIndexes.has(index) ? 'week-start' : ''} key={`${date}-${index}`}>{date}</span>)}
                 </div>
               </div>
-              {schedule.rows.filter((item) => visibleTaskIds.has(item.id) && item.days > 0).map((item) => (
-                <div className="gantt-row" key={item.id} style={{ '--columns': schedule.workdays.length, width: timelineWidth } as React.CSSProperties}>
+              {visibleTasks.map((task, visibleIndex) => {
+                const item = scheduleById.get(task.id)
+                const nextTask = visibleTasks[visibleIndex + 1]
+                const isProjectStart = task.level === 0
+                const isProjectEnd = !nextTask || nextTask.level === 0
+                return (
+                <div className={`gantt-row${isProjectStart ? ' project-start' : ''}${isProjectEnd ? ' project-end' : ''}`} key={task.id} style={{ '--columns': schedule.workdays.length, width: timelineWidth } as React.CSSProperties}>
                   {[...weekStartIndexes].map((index) => (
                     <span className="week-line" key={index} style={{ left: `${(index / schedule.workdays.length) * 100}%` }} />
                   ))}
-                  <div
+                  {item && item.days > 0 && <div
                     className={`gantt-bar${item.parent ? ' parent-bar' : ''}${item.completed ? ' completed' : ''}`}
                     style={{
                       left: `${(item.start / schedule.workdays.length) * 100}%`,
@@ -709,9 +779,10 @@ export default function App() {
                     aria-label={`${item.name}、${item.days}営業日`}
                   >
                     {!item.parent && item.name}
-                  </div>
+                  </div>}
                 </div>
-              ))}
+                )
+              })}
             </>
           ) : (
             <div className="month-calendar">
