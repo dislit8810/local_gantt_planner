@@ -13,6 +13,12 @@ export type Task = {
   execution?: 'sequence' | 'parallel'
   collapsed?: boolean
   projectStartDate?: string
+  manualStartDate?: string
+  manualEndDate?: string
+  actualStartDate?: string
+  actualEndDate?: string
+  plannedStartAtCompletion?: string
+  plannedEndAtCompletion?: string
 }
 
 type BackupPayload = {
@@ -22,10 +28,42 @@ type BackupPayload = {
   settings: { parallel: boolean; projectsParallel: boolean; startDate: string }
 }
 
+type SharedJsonHandle = {
+  name: string
+  getFile: () => Promise<File>
+  createWritable: () => Promise<{
+    write: (data: string) => Promise<void>
+    close: () => Promise<void>
+  }>
+}
+
 const rememberedDayValue = (task: Task) => task.dayValue ?? (task.unit === 'day' && task.days > 0 ? task.days : 1)
 const rememberedWeekValue = (task: Task) => task.weekValue ?? (task.unit === 'week' && task.days > 0 ? task.days / 5 : 1)
+const localToday = () => {
+  const date = new Date()
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+const shortDate = (value?: string) => value ? `${value.slice(5, 7)}/${value.slice(8, 10)}` : '—'
+const actualStartForCompletion = (task: Task, scheduledStart: string | undefined, completedOn: string) => {
+  const candidate = task.actualStartDate ?? task.manualStartDate ?? scheduledStart ?? completedOn
+  return candidate > completedOn ? completedOn : candidate
+}
+const businessDaysInclusive = (startText: string, endText: string) => {
+  const start = new Date(`${startText}T00:00:00`)
+  const end = new Date(`${endText}T00:00:00`)
+  if (end < start) return 1
+  let days = 0
+  for (const date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
+    if (date.getDay() !== 0 && date.getDay() !== 6) days += 1
+  }
+  return Math.max(1, days)
+}
 const tasksStorageKey = 'schedule-app.tasks.v1'
 const settingsStorageKey = 'schedule-app.settings.v1'
+const taskPanelWidthStorageKey = 'schedule-app.task-panel-width.v1'
 
 const loadStoredTasks = (): Task[] => {
   try {
@@ -81,6 +119,12 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'gantt' | 'calendar'>('gantt')
   const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saved')
   const [sharedDataReady, setSharedDataReady] = useState(false)
+  const [sharedJsonHandle, setSharedJsonHandle] = useState<SharedJsonHandle | null>(null)
+  const [sharedJsonName, setSharedJsonName] = useState('')
+  const [taskPanelWidth, setTaskPanelWidth] = useState(() => {
+    const stored = Number(localStorage.getItem(taskPanelWidthStorageKey))
+    return Number.isFinite(stored) && stored >= 560 ? stored : 780
+  })
   const inputRef = useRef<HTMLInputElement>(null)
   const durationRef = useRef<HTMLInputElement>(null)
   const importRef = useRef<HTMLInputElement>(null)
@@ -142,6 +186,51 @@ export default function App() {
     return { days, segments }
   }), [calendarDays, schedule, taskItems, visibleTasks])
 
+  const applyBackupPayload = (payload: BackupPayload) => {
+    if (payload.schemaVersion !== 1 || !Array.isArray(payload.tasks)) throw new Error('対応していないバックアップ形式です。')
+    setTaskItems(payload.tasks.map((task) => ({
+      ...task,
+      dayValue: rememberedDayValue(task),
+      weekValue: rememberedWeekValue(task),
+      completed: task.completed ?? false,
+    })))
+    setParallel(payload.settings?.parallel ?? true)
+    setProjectsParallel(payload.settings?.projectsParallel ?? false)
+    setStartDate(payload.settings?.startDate ?? '2026-09-01')
+    setEditingId(null)
+    setDurationEditingId(null)
+    setSelectedId(null)
+    setSelectedTaskIds(new Set())
+  }
+
+  const loadSharedJson = async (handle: SharedJsonHandle, confirmReplacement: boolean) => {
+    const payload = JSON.parse(await (await handle.getFile()).text()) as BackupPayload
+    if (confirmReplacement && !confirm('現在の表示を、選択した共有JSONの内容で置き換えますか？')) return false
+    applyBackupPayload(payload)
+    setSharedJsonHandle(handle)
+    setSharedJsonName(handle.name)
+    return true
+  }
+
+  const selectSharedJson = async () => {
+    const picker = (window as Window & {
+      showOpenFilePicker?: (options: object) => Promise<SharedJsonHandle[]>
+    }).showOpenFilePicker
+    if (!picker) {
+      alert('このブラウザは共有JSONの直接編集に対応していません。ChromeまたはEdgeで開いてください。')
+      return
+    }
+    try {
+      const [handle] = await picker.call(window, {
+        multiple: false,
+        types: [{ description: 'Schedule App JSON', accept: { 'application/json': ['.json'] } }],
+      })
+      if (handle && await loadSharedJson(handle, true)) alert(`${handle.name}を共有データとして開きました。以後の変更はこのファイルにも自動保存されます。`)
+    } catch (error) {
+      if ((error as DOMException).name !== 'AbortError') alert('共有JSONを開けませんでした。')
+    }
+  }
+
   const exportBackup = () => {
     const payload: BackupPayload = {
       schemaVersion: 1,
@@ -160,22 +249,8 @@ export default function App() {
   const importBackup = async (file: File) => {
     try {
       const payload = JSON.parse(await file.text()) as BackupPayload
-      if (payload.schemaVersion !== 1 || !Array.isArray(payload.tasks)) throw new Error('対応していないバックアップ形式です。')
       if (!confirm('現在のタスクと設定を、選択したバックアップで置き換えますか？')) return
-      const normalized = payload.tasks.map((task) => ({
-        ...task,
-        dayValue: rememberedDayValue(task),
-        weekValue: rememberedWeekValue(task),
-        completed: task.completed ?? false,
-      }))
-      setTaskItems(normalized)
-      setParallel(payload.settings?.parallel ?? true)
-      setProjectsParallel(payload.settings?.projectsParallel ?? false)
-      setStartDate(payload.settings?.startDate ?? '2026-09-01')
-      setEditingId(null)
-      setDurationEditingId(null)
-      setSelectedId(null)
-      setSelectedTaskIds(new Set())
+      applyBackupPayload(payload)
       alert('バックアップを読み込みました。')
     } catch (error) {
       alert(error instanceof Error ? error.message : 'バックアップを読み込めませんでした。')
@@ -242,6 +317,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    localStorage.setItem(taskPanelWidthStorageKey, String(taskPanelWidth))
+  }, [taskPanelWidth])
+
+  useEffect(() => {
     if (!sharedDataReady) return
     setSaveStatus('saving')
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
@@ -259,6 +338,11 @@ export default function App() {
           body: JSON.stringify(payload),
         })
         if (!response.ok) throw new Error('保存に失敗しました。')
+        if (sharedJsonHandle) {
+          const writable = await sharedJsonHandle.createWritable()
+          await writable.write(`${JSON.stringify(payload, null, 2)}\n`)
+          await writable.close()
+        }
         localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
         localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate }))
         setSaveStatus('saved')
@@ -269,9 +353,7 @@ export default function App() {
     return () => {
       if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
     }
-  }, [taskItems, parallel, projectsParallel, startDate, sharedDataReady])
-
-  const shortDate = (value?: string) => value ? `${value.slice(5, 7)}/${value.slice(8, 10)}` : '—'
+  }, [taskItems, parallel, projectsParallel, startDate, sharedDataReady, sharedJsonHandle])
 
   useEffect(() => {
     if (editingId !== null) {
@@ -487,8 +569,8 @@ export default function App() {
     const days = task.unit === 'day' ? safeValue : safeValue * 5
     setTaskItems((current) => current.map((item) => item.id === task.id
       ? task.unit === 'day'
-        ? { ...item, days, dayValue: safeValue }
-        : { ...item, days, weekValue: safeValue }
+        ? { ...item, days, dayValue: safeValue, manualEndDate: undefined }
+        : { ...item, days, weekValue: safeValue, manualEndDate: undefined }
       : item,
     ))
   }
@@ -507,8 +589,8 @@ export default function App() {
     setTaskItems((current) => current.map((item) =>
       item.id === task.id
         ? unit === 'week'
-          ? { ...item, unit: 'week', days: rememberedWeekValue(item) * 5 }
-          : { ...item, unit: 'day', days: rememberedDayValue(item) }
+          ? { ...item, unit: 'week', days: rememberedWeekValue(item) * 5, manualEndDate: undefined }
+          : { ...item, unit: 'day', days: rememberedDayValue(item), manualEndDate: undefined }
         : item,
     ))
     setDurationDraft(String(unit === 'week' ? rememberedWeekValue(task) : rememberedDayValue(task)))
@@ -539,7 +621,35 @@ export default function App() {
     return task.unit === 'day' ? `${rememberedDayValue(task)}日` : `${rememberedWeekValue(task)}週`
   }
 
+  const updatePlannedDate = (task: Task, field: 'start' | 'end', value: string) => {
+    const scheduled = scheduleById.get(task.id)
+    let start = field === 'start' ? value : task.manualStartDate ?? scheduled?.startDate ?? ''
+    let end = field === 'end' ? value : task.manualEndDate ?? scheduled?.endDate ?? ''
+
+    if (start && end && end < start) {
+      if (field === 'start') end = start
+      else start = end
+    }
+
+    setTaskItems((current) => current.map((item) => {
+      if (item.id !== task.id) return item
+      const next = {
+        ...item,
+        manualStartDate: field === 'start' ? value || undefined : start && start !== scheduled?.startDate ? start : item.manualStartDate,
+        manualEndDate: field === 'end' ? value || undefined : end && end !== scheduled?.endDate ? end : item.manualEndDate,
+      }
+      if (!parentTaskIds.has(item.id) && start && end && value) {
+        const days = businessDaysInclusive(start, end)
+        next.days = days
+        next.dayValue = days
+        next.unit = 'day'
+      }
+      return next
+    }))
+  }
+
   const setTaskCompletion = (taskId: number, completed: boolean) => {
+    const completedOn = localToday()
     setTaskItems((current) => {
       const next = current.map((task) => ({ ...task }))
       const targetIndex = next.findIndex((task) => task.id === taskId)
@@ -551,7 +661,25 @@ export default function App() {
 
       // A parent controls its entire branch; a leaf controls only itself.
       for (let index = targetIndex; index < branchEnd; index += 1) {
+        const wasCompleted = next[index].completed ?? false
         next[index].completed = completed
+        if (completed) {
+          if (!wasCompleted || !next[index].plannedStartAtCompletion) {
+            next[index].plannedStartAtCompletion = next[index].manualStartDate ?? scheduleById.get(next[index].id)?.startDate
+          }
+          if (!wasCompleted || !next[index].plannedEndAtCompletion) {
+            next[index].plannedEndAtCompletion = next[index].manualEndDate ?? scheduleById.get(next[index].id)?.endDate
+          }
+          if (!wasCompleted || !next[index].actualStartDate) {
+            next[index].actualStartDate = actualStartForCompletion(next[index], scheduleById.get(next[index].id)?.startDate, completedOn)
+          }
+          if (!wasCompleted || !next[index].actualEndDate) next[index].actualEndDate = completedOn
+        } else {
+          next[index].actualStartDate = undefined
+          next[index].actualEndDate = undefined
+          next[index].plannedStartAtCompletion = undefined
+          next[index].plannedEndAtCompletion = undefined
+        }
       }
 
       // Recalculate every parent from the deepest one upward.
@@ -560,7 +688,26 @@ export default function App() {
         if (next[index + 1].level <= level) continue
         let end = index + 1
         while (end < next.length && next[end].level > level) end += 1
-        next[index].completed = next.slice(index + 1, end).every((task) => task.completed)
+        const wasCompleted = next[index].completed ?? false
+        const isCompleted = next.slice(index + 1, end).every((task) => task.completed)
+        next[index].completed = isCompleted
+        if (isCompleted) {
+          if (!wasCompleted || !next[index].plannedStartAtCompletion) {
+            next[index].plannedStartAtCompletion = next[index].manualStartDate ?? scheduleById.get(next[index].id)?.startDate
+          }
+          if (!wasCompleted || !next[index].plannedEndAtCompletion) {
+            next[index].plannedEndAtCompletion = next[index].manualEndDate ?? scheduleById.get(next[index].id)?.endDate
+          }
+          if (!wasCompleted || !next[index].actualStartDate) {
+            next[index].actualStartDate = actualStartForCompletion(next[index], scheduleById.get(next[index].id)?.startDate, completedOn)
+          }
+          if (!wasCompleted || !next[index].actualEndDate) next[index].actualEndDate = completedOn
+        } else {
+          next[index].actualStartDate = undefined
+          next[index].actualEndDate = undefined
+          next[index].plannedStartAtCompletion = undefined
+          next[index].plannedEndAtCompletion = undefined
+        }
       }
 
       return next
@@ -602,8 +749,8 @@ export default function App() {
       <header className="app-header">
         <h1>Schedule App v0.1</h1>
         <div className="header-actions">
-          <span className={`save-status ${saveStatus}`} title="ChromeとCodex内ブラウザで同じローカルデータを使用します">
-            {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '共通データに保存済み' : '共通データに保存できません'}
+          <span className={`save-status ${saveStatus}`} title={sharedJsonName ? `${sharedJsonName}にも自動保存します` : 'このPCの共通ローカルデータを使用します'}>
+            {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? sharedJsonName ? `${sharedJsonName}に保存済み` : '共通データに保存済み' : '共通データに保存できません'}
           </span>
           <label>
             開始日
@@ -612,10 +759,10 @@ export default function App() {
           <button className="settings-button" type="button" aria-label="設定を開く" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
       </header>
-      <section className={`workspace${viewMode === 'calendar' ? ' calendar-view' : ''}`}>
+      <section className={`workspace${viewMode === 'calendar' ? ' calendar-view' : ''}`} style={{ '--task-panel-width': `${taskPanelWidth}px` } as CSSProperties}>
         <div className="task-panel">
           <div className="task-title"><strong>タスク一覧</strong></div>
-          <div className="panel-heading"><span>タスク</span><span>開始</span><span>終了</span><span>日数</span></div>
+          <div className="panel-heading"><span>タスク</span><span>実行</span><span className="date-heading">開始<small>予定 / 実績</small></span><span className="date-heading">終了<small>予定 / 実績</small></span><span>日数</span></div>
           {visibleTasks.map((task, visibleIndex) => {
             const isProject = task.level === 0
             const isParent = parentTaskIds.has(task.id)
@@ -640,49 +787,95 @@ export default function App() {
                   onChange={(event) => setTaskCompletion(task.id, event.target.checked)}
                 />
               </div>
-              {editingId === task.id ? (
+              <div className="task-name-cell">
+                {editingId === task.id ? (
+                  <input
+                    ref={inputRef}
+                    className="task-name-input"
+                    value={task.name}
+                    placeholder="タスク名を入力"
+                    onChange={(event) => updateTaskName(task.id, event.target.value)}
+                    onBlur={() => finishEditing(task)}
+                    onKeyDown={(event) => {
+                      if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+                        event.preventDefault()
+                        reorderTask(task, event.key === 'ArrowUp' ? -1 : 1)
+                      } else if (event.key === 'Enter') {
+                        event.preventDefault()
+                        addTaskAfter(task, false)
+                      } else if (event.key === 'Tab') {
+                        event.preventDefault()
+                        changeTaskLevel(task, event.shiftKey ? -1 : 1)
+                      } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                        event.preventDefault()
+                        moveTaskSelection(task, event.key === 'ArrowUp' ? -1 : 1)
+                      } else if (event.key === 'ArrowRight' && event.currentTarget.selectionStart === event.currentTarget.value.length && !parentTaskIds.has(task.id)) {
+                        event.preventDefault()
+                        finishEditing(task)
+                        setDurationEditingId(task.id)
+                      } else if (event.key === 'Escape') {
+                        event.preventDefault()
+                        finishEditing(task)
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="task-name-button"
+                    type="button"
+                    data-task-id={task.id}
+                    onClick={(event) => { event.stopPropagation(); selectTaskRange(task, event.shiftKey); if (!event.shiftKey) setEditingId(task.id) }}
+                  >
+                    {task.name}
+                  </button>
+                )}
+              </div>
+              <select
+                className="task-execution-select"
+                aria-label={`${task.name}の子タスク実行方法`}
+                title="このタスクの直下にある子タスクの実行方法"
+                value={task.execution ?? 'default'}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                onChange={(event) => {
+                  event.stopPropagation()
+                  setTaskItems((current) => current.map((item) =>
+                    item.id === task.id
+                      ? { ...item, execution: event.target.value === 'default' ? undefined : event.target.value as 'sequence' | 'parallel' }
+                      : item,
+                  ))
+                }}
+              >
+                <option value="default">既定</option>
+                <option value="sequence">順番</option>
+                <option value="parallel">並列</option>
+              </select>
+              <div className="task-date-cell">
                 <input
-                  ref={inputRef}
-                  className="task-name-input"
-                  value={task.name}
-                  placeholder="タスク名を入力"
-                  onChange={(event) => updateTaskName(task.id, event.target.value)}
-                  onBlur={() => finishEditing(task)}
-                  onKeyDown={(event) => {
-                    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-                      event.preventDefault()
-                      reorderTask(task, event.key === 'ArrowUp' ? -1 : 1)
-                    } else if (event.key === 'Enter') {
-                      event.preventDefault()
-                      addTaskAfter(task, false)
-                    } else if (event.key === 'Tab') {
-                      event.preventDefault()
-                      changeTaskLevel(task, event.shiftKey ? -1 : 1)
-                    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-                      event.preventDefault()
-                      moveTaskSelection(task, event.key === 'ArrowUp' ? -1 : 1)
-                    } else if (event.key === 'ArrowRight' && event.currentTarget.selectionStart === event.currentTarget.value.length && !parentTaskIds.has(task.id)) {
-                      event.preventDefault()
-                      finishEditing(task)
-                      setDurationEditingId(task.id)
-                    } else if (event.key === 'Escape') {
-                      event.preventDefault()
-                      finishEditing(task)
-                    }
-                  }}
+                  className="task-date-input"
+                  type="date"
+                  aria-label={`${task.name}の予定開始日`}
+                  title="予定開始日。空欄に戻すと自動計算になります"
+                  value={task.manualStartDate ?? task.plannedStartAtCompletion ?? scheduleById.get(task.id)?.startDate ?? ''}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  onChange={(event) => updatePlannedDate(task, 'start', event.target.value)}
                 />
-              ) : (
-                <button
-                  className="task-name-button"
-                  type="button"
-                  data-task-id={task.id}
-                  onClick={(event) => { event.stopPropagation(); selectTaskRange(task, event.shiftKey); if (!event.shiftKey) setEditingId(task.id) }}
-                >
-                  {task.name}
-                </button>
-              )}
-              <span className="task-date">{shortDate(scheduleById.get(task.id)?.startDate)}</span>
-              <span className="task-date">{shortDate(scheduleById.get(task.id)?.endDate)}</span>
+                <small className="actual-date" title={task.actualStartDate}>{task.completed ? shortDate(task.actualStartDate) : '—'}</small>
+              </div>
+              <div className="task-date-cell">
+                <input
+                  className="task-date-input"
+                  type="date"
+                  aria-label={`${task.name}の予定終了日`}
+                  title="予定終了日。空欄に戻すと自動計算になります"
+                  value={task.manualEndDate ?? task.plannedEndAtCompletion ?? scheduleById.get(task.id)?.endDate ?? ''}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  onChange={(event) => updatePlannedDate(task, 'end', event.target.value)}
+                />
+                <small className="actual-date" title={task.actualEndDate}>{task.completed ? shortDate(task.actualEndDate) : '—'}</small>
+              </div>
               {parentTaskIds.has(task.id) ? (
                 <span className="auto-duration">{scheduleById.get(task.id)?.days ?? 0}日 <small>自動</small></span>
               ) : durationEditingId === task.id ? (
@@ -742,6 +935,26 @@ export default function App() {
           })}
           <div className="add-actions"><button className="add-task" type="button" onClick={addTitleTask}>＋ プロジェクト追加</button><button className="add-task" type="button" onClick={addRootTask}>＋ タスク追加</button></div>
         </div>
+        <div
+          className="panel-resizer"
+          role="separator"
+          aria-label="タスク一覧とスケジュールの幅を変更"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
+          onPointerMove={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+            const left = event.currentTarget.parentElement?.getBoundingClientRect().left ?? 0
+            setTaskPanelWidth(Math.max(560, Math.min(1200, event.clientX - left)))
+          }}
+          onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
+          onDoubleClick={() => setTaskPanelWidth(780)}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+            event.preventDefault()
+            setTaskPanelWidth((current) => Math.max(560, Math.min(1200, current + (event.key === 'ArrowLeft' ? -20 : 20))))
+          }}
+        />
         <div className={`gantt-panel${viewMode === 'calendar' ? ' calendar-mode' : ''}`}>
           <div className="gantt-title">
             <strong>{viewMode === 'gantt' ? 'ガントチャート' : 'カレンダー'}</strong>
@@ -848,37 +1061,19 @@ export default function App() {
                 ))}
               </div>
             )}
-            {parentTasks.length > 0 && (
-              <div className="parent-settings">
-                <h3>親タスクごとの実行方法</h3>
-                {parentTasks.map((task) => (
-                  <label key={task.id}>
-                    <span>{task.name}</span>
-                    <select
-                      value={task.execution ?? 'default'}
-                      onChange={(event) => setTaskItems((current) => current.map((item) =>
-                        item.id === task.id
-                          ? { ...item, execution: event.target.value === 'default' ? undefined : event.target.value as 'sequence' | 'parallel' }
-                          : item,
-                      ))}
-                    >
-                      <option value="default">既定に従う</option>
-                      <option value="sequence">順番</option>
-                      <option value="parallel">並列</option>
-                    </select>
-                  </label>
-                ))}
-              </div>
-            )}
             <div className="data-tools">
               <h3>バックアップ</h3>
               <p className="setting-note">タスクと設定をJSONファイルに保存・復元します。</p>
-              <p className="setting-note">通常モードとシークレットモードは別々に保存されます。別環境へ移すときはJSONバックアップを使ってください。</p>
+              <p className="setting-note">共有JSONを選ぶと、そのセッション中の変更を選択ファイルにも自動保存します。各PCで同じOneDriveやネットワーク共有上のJSONを選択してください。</p>
+              <p className="setting-note">複数PCからの同時編集には対応していません。最後に保存した内容が優先されます。</p>
               <div>
+                <button type="button" onClick={() => void selectSharedJson()}>共有JSONを選択</button>
+                {sharedJsonHandle && <button type="button" onClick={() => void loadSharedJson(sharedJsonHandle, true)}>共有JSONを再読込</button>}
                 <button type="button" onClick={exportBackup}>JSONをエクスポート</button>
                 <button type="button" onClick={() => importRef.current?.click()}>JSONをインポート</button>
                 <input ref={importRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importBackup(file) }} />
               </div>
+              {sharedJsonName && <p className="shared-json-name">選択中: {sharedJsonName}</p>}
             </div>
             <details className="shortcut-help">
               <summary>キーボードショートカット</summary>

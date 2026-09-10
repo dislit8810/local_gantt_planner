@@ -61,33 +61,73 @@ function businessDayOffset(origin: Date, target: Date) {
   return offset
 }
 
+function businessDayEndOffset(origin: Date, target: Date) {
+  const offset = businessDayOffset(origin, target)
+  return target.getDay() === 0 || target.getDay() === 6 ? offset : offset + 1
+}
+
 export function calculateSchedule(tasks: Task[], parallelChildren: boolean, parallelProjects: boolean, startDateText: string) {
   const rows = new Map<number, ScheduleRow>()
   const roots = buildTree(tasks)
-  const requestedStartDates = [startDateText, ...roots.map((root) => root.task.projectStartDate).filter(Boolean) as string[]]
+  const requestedStartDates = [
+    startDateText,
+    ...roots.map((root) => root.task.projectStartDate).filter(Boolean) as string[],
+    ...tasks.map((task) => task.manualStartDate).filter(Boolean) as string[],
+    ...tasks.map((task) => task.actualStartDate).filter(Boolean) as string[],
+  ]
   const originText = requestedStartDates.sort()[0] ?? startDateText
   const startDate = nextBusinessDay(new Date(`${originText}T00:00:00`))
 
   const scheduleNode = (node: Node, start: number): number => {
+    const scheduledStart = node.task.manualStartDate
+      ? businessDayOffset(startDate, new Date(`${node.task.manualStartDate}T00:00:00`))
+      : start
+
     if (node.children.length === 0) {
       if (node.task.completed) {
-        rows.set(node.task.id, { id: node.task.id, name: node.task.name, start, days: 0, parent: false, completed: true })
-        return start
+        if (!node.task.actualEndDate) {
+          rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: scheduledStart, days: 0, parent: false, completed: true })
+          return start
+        }
+        const actualStart = node.task.actualStartDate
+          ? businessDayOffset(startDate, new Date(`${node.task.actualStartDate}T00:00:00`))
+          : scheduledStart
+        const actualEnd = businessDayEndOffset(startDate, new Date(`${node.task.actualEndDate}T00:00:00`))
+        const end = Math.max(actualStart + 0.5, actualEnd)
+        rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: actualStart, days: end - actualStart, parent: false, completed: true })
+        return Math.max(start, end)
       }
-      const days = Math.max(0.5, node.task.days || 1)
-      rows.set(node.task.id, { id: node.task.id, name: node.task.name, start, days, parent: false, completed: node.task.completed ?? false })
-      return start + days
+      const automaticDays = Math.max(0.5, node.task.days || 1)
+      const requestedEnd = node.task.manualEndDate
+        ? businessDayEndOffset(startDate, new Date(`${node.task.manualEndDate}T00:00:00`))
+        : scheduledStart + automaticDays
+      const end = Math.max(scheduledStart + automaticDays, requestedEnd)
+      rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: scheduledStart, days: end - scheduledStart, parent: false, completed: node.task.completed ?? false })
+      return Math.max(start, end)
     }
 
-    let end = start
+    let end = scheduledStart
     const runInParallel = node.task.execution ? node.task.execution === 'parallel' : parallelChildren
     if (runInParallel) {
-      end = Math.max(...node.children.map((child) => scheduleNode(child, start)))
+      end = Math.max(...node.children.map((child) => scheduleNode(child, scheduledStart)))
     } else {
       for (const child of node.children) end = scheduleNode(child, end)
     }
-    rows.set(node.task.id, { id: node.task.id, name: node.task.name, start, days: end - start, parent: true, completed: node.task.completed ?? false })
-    return end
+    if (node.task.completed && node.task.actualEndDate) {
+      const actualStart = node.task.actualStartDate
+        ? businessDayOffset(startDate, new Date(`${node.task.actualStartDate}T00:00:00`))
+        : scheduledStart
+      const actualEnd = businessDayEndOffset(startDate, new Date(`${node.task.actualEndDate}T00:00:00`))
+      const completedEnd = Math.max(actualStart + 0.5, actualEnd)
+      rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: actualStart, days: completedEnd - actualStart, parent: true, completed: true })
+      return Math.max(start, completedEnd)
+    }
+    if (node.task.manualEndDate) {
+      const requestedEnd = businessDayEndOffset(startDate, new Date(`${node.task.manualEndDate}T00:00:00`))
+      end = Math.max(end, requestedEnd)
+    }
+    rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: scheduledStart, days: end - scheduledStart, parent: true, completed: node.task.completed ?? false })
+    return Math.max(start, end)
   }
 
   let projectEnd = 0
