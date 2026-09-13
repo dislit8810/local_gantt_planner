@@ -25,16 +25,48 @@ type BackupPayload = {
   schemaVersion: 1
   exportedAt: string
   tasks: Task[]
-  settings: { parallel: boolean; projectsParallel: boolean; startDate: string }
+  settings: { parallel: boolean; projectsParallel: boolean; startDate: string; holidays?: string[] }
 }
 
 type SharedJsonHandle = {
   name: string
   getFile: () => Promise<File>
+  queryPermission?: (options: { mode: 'readwrite' }) => Promise<'granted' | 'denied' | 'prompt'>
+  requestPermission?: (options: { mode: 'readwrite' }) => Promise<'granted' | 'denied'>
   createWritable: () => Promise<{
     write: (data: string) => Promise<void>
     close: () => Promise<void>
   }>
+}
+
+const sharedHandleDatabase = 'schedule-app.handles.v1'
+const sharedHandleStore = 'handles'
+const sharedHandleKey = 'active-json'
+const openHandleDatabase = () => new Promise<IDBDatabase>((resolve, reject) => {
+  const request = indexedDB.open(sharedHandleDatabase, 1)
+  request.onupgradeneeded = () => request.result.createObjectStore(sharedHandleStore)
+  request.onsuccess = () => resolve(request.result)
+  request.onerror = () => reject(request.error)
+})
+const storeSharedHandle = async (handle: SharedJsonHandle) => {
+  const database = await openHandleDatabase()
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(sharedHandleStore, 'readwrite')
+    transaction.objectStore(sharedHandleStore).put(handle, sharedHandleKey)
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error)
+  })
+  database.close()
+}
+const restoreSharedHandle = async () => {
+  const database = await openHandleDatabase()
+  const handle = await new Promise<SharedJsonHandle | undefined>((resolve, reject) => {
+    const request = database.transaction(sharedHandleStore).objectStore(sharedHandleStore).get(sharedHandleKey)
+    request.onsuccess = () => resolve(request.result as SharedJsonHandle | undefined)
+    request.onerror = () => reject(request.error)
+  })
+  database.close()
+  return handle
 }
 
 const rememberedDayValue = (task: Task) => task.dayValue ?? (task.unit === 'day' && task.days > 0 ? task.days : 1)
@@ -46,18 +78,42 @@ const localToday = () => {
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
 }
+const localDateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+const icsDateKey = (value?: string) => {
+  const match = value?.match(/^(\d{4})(\d{2})(\d{2})/)
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : undefined
+}
+const holidaysFromIcs = (text: string) => {
+  const unfolded = text.replace(/\r?\n[ \t]/g, '')
+  const dates = new Set<string>()
+  for (const event of unfolded.split('BEGIN:VEVENT').slice(1)) {
+    const body = event.split('END:VEVENT')[0] ?? ''
+    if (/^STATUS:CANCELLED$/mi.test(body)) continue
+    const startLine = body.match(/^DTSTART(?:;[^:]*)?:(.+)$/mi)?.[1]?.trim()
+    const endLine = body.match(/^DTEND(?:;[^:]*)?:(.+)$/mi)?.[1]?.trim()
+    const startKey = icsDateKey(startLine)
+    if (!startKey) continue
+    const start = new Date(`${startKey}T00:00:00`)
+    const endKey = icsDateKey(endLine)
+    let exclusiveEnd = endKey ? new Date(`${endKey}T00:00:00`) : new Date(start.getTime() + 86400000)
+    if (exclusiveEnd <= start) exclusiveEnd = new Date(start.getTime() + 86400000)
+    for (const date = new Date(start); date < exclusiveEnd; date.setDate(date.getDate() + 1)) dates.add(localDateKey(date))
+  }
+  return [...dates].sort()
+}
 const shortDate = (value?: string) => value ? `${value.slice(5, 7)}/${value.slice(8, 10)}` : '—'
 const actualStartForCompletion = (task: Task, scheduledStart: string | undefined, completedOn: string) => {
   const candidate = task.actualStartDate ?? task.manualStartDate ?? scheduledStart ?? completedOn
   return candidate > completedOn ? completedOn : candidate
 }
-const businessDaysInclusive = (startText: string, endText: string) => {
+const businessDaysInclusive = (startText: string, endText: string, holidays: Set<string>) => {
   const start = new Date(`${startText}T00:00:00`)
   const end = new Date(`${endText}T00:00:00`)
   if (end < start) return 1
   let days = 0
   for (const date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
-    if (date.getDay() !== 0 && date.getDay() !== 6) days += 1
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    if (date.getDay() !== 0 && date.getDay() !== 6 && !holidays.has(key)) days += 1
   }
   return Math.max(1, days)
 }
@@ -86,7 +142,7 @@ const loadStoredTasks = (): Task[] => {
 const loadStoredSettings = () => {
   try {
     const stored = localStorage.getItem(settingsStorageKey)
-    return stored ? JSON.parse(stored) as { parallel?: boolean; projectsParallel?: boolean; startDate?: string } : {}
+    return stored ? JSON.parse(stored) as { parallel?: boolean; projectsParallel?: boolean; startDate?: string; holidays?: string[] } : {}
   } catch {
     return {}
   }
@@ -108,6 +164,13 @@ export default function App() {
   const [parallel, setParallel] = useState(storedSettings.parallel ?? true)
   const [projectsParallel, setProjectsParallel] = useState(storedSettings.projectsParallel ?? false)
   const [startDate, setStartDate] = useState(storedSettings.startDate ?? '2026-09-01')
+  const [holidays, setHolidays] = useState<string[]>(storedSettings.holidays ?? [])
+  const [holidayDraft, setHolidayDraft] = useState('')
+  const [holidayEndDraft, setHolidayEndDraft] = useState('')
+  const [holidayEditMode, setHolidayEditMode] = useState(false)
+  const [holidayAnchor, setHolidayAnchor] = useState('')
+  const [holidayRangeAction, setHolidayRangeAction] = useState<'add' | 'remove' | null>(null)
+  const [lastIcsImport, setLastIcsImport] = useState<{ name: string; addedDates: string[] } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [taskItems, setTaskItems] = useState<Task[]>(loadStoredTasks)
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -120,6 +183,7 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saved')
   const [sharedDataReady, setSharedDataReady] = useState(false)
   const [sharedJsonHandle, setSharedJsonHandle] = useState<SharedJsonHandle | null>(null)
+  const [rememberedJsonHandle, setRememberedJsonHandle] = useState<SharedJsonHandle | null>(null)
   const [sharedJsonName, setSharedJsonName] = useState('')
   const [taskPanelWidth, setTaskPanelWidth] = useState(() => {
     const stored = Number(localStorage.getItem(taskPanelWidthStorageKey))
@@ -128,8 +192,10 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null)
   const durationRef = useRef<HTMLInputElement>(null)
   const importRef = useRef<HTMLInputElement>(null)
+  const icsImportRef = useRef<HTMLInputElement>(null)
   const saveTimerRef = useRef<number | null>(null)
-  const schedule = useMemo(() => calculateSchedule(taskItems, parallel, projectsParallel, startDate), [taskItems, parallel, projectsParallel, startDate])
+  const schedule = useMemo(() => calculateSchedule(taskItems, parallel, projectsParallel, startDate, holidays), [taskItems, parallel, projectsParallel, startDate, holidays])
+  const holidaySet = useMemo(() => new Set(holidays), [holidays])
   const weekStartIndexes = useMemo(() => {
     let total = 0
     return new Set(schedule.weeks.slice(0, -1).map((week) => {
@@ -138,6 +204,8 @@ export default function App() {
     }))
   }, [schedule.weeks])
   const timelineWidth = Math.max(720, schedule.workdays.length * 48)
+  const today = localToday()
+  const todayIndex = schedule.isoDates.indexOf(today)
   const parentTasks = taskItems.filter((task, index) => taskItems[index + 1]?.level > task.level)
   const projectTasks = taskItems.filter((task) => task.level === 0)
   const parentTaskIds = new Set(parentTasks.map((task) => task.id))
@@ -197,6 +265,7 @@ export default function App() {
     setParallel(payload.settings?.parallel ?? true)
     setProjectsParallel(payload.settings?.projectsParallel ?? false)
     setStartDate(payload.settings?.startDate ?? '2026-09-01')
+    setHolidays(payload.settings?.holidays ?? [])
     setEditingId(null)
     setDurationEditingId(null)
     setSelectedId(null)
@@ -208,7 +277,9 @@ export default function App() {
     if (confirmReplacement && !confirm('現在の表示を、選択した共有JSONの内容で置き換えますか？')) return false
     applyBackupPayload(payload)
     setSharedJsonHandle(handle)
+    setRememberedJsonHandle(handle)
     setSharedJsonName(handle.name)
+    await storeSharedHandle(handle)
     return true
   }
 
@@ -231,12 +302,25 @@ export default function App() {
     }
   }
 
+  const reconnectSharedJson = async () => {
+    if (!rememberedJsonHandle) return
+    try {
+      const permission = rememberedJsonHandle.requestPermission
+        ? await rememberedJsonHandle.requestPermission({ mode: 'readwrite' })
+        : 'granted'
+      if (permission !== 'granted') throw new Error('共有JSONへのアクセスが許可されませんでした。')
+      await loadSharedJson(rememberedJsonHandle, true)
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '共有JSONへ再接続できませんでした。')
+    }
+  }
+
   const exportBackup = () => {
     const payload: BackupPayload = {
       schemaVersion: 1,
       exportedAt: new Date().toISOString(),
       tasks: taskItems,
-      settings: { parallel, projectsParallel, startDate },
+      settings: { parallel, projectsParallel, startDate, holidays },
     }
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
@@ -271,6 +355,23 @@ export default function App() {
     let active = true
     const loadSharedData = async () => {
       try {
+        const rememberedHandle = await restoreSharedHandle().catch(() => undefined)
+        if (rememberedHandle) {
+          setRememberedJsonHandle(rememberedHandle)
+          setSharedJsonName(rememberedHandle.name)
+          const permission = rememberedHandle.queryPermission ? await rememberedHandle.queryPermission({ mode: 'readwrite' }) : 'granted'
+          if (permission === 'granted') {
+            const payload = JSON.parse(await (await rememberedHandle.getFile()).text()) as BackupPayload
+            if (payload.schemaVersion !== 1 || !Array.isArray(payload.tasks)) throw new Error('共有JSONの形式が正しくありません。')
+            applyBackupPayload(payload)
+            setSharedJsonHandle(rememberedHandle)
+            if (active) {
+              setSharedDataReady(true)
+              setSaveStatus('saved')
+            }
+            return
+          }
+        }
         const response = await fetch('/api/state', { cache: 'no-store' })
         if (!active) return
         if (response.status === 204) {
@@ -278,7 +379,7 @@ export default function App() {
             schemaVersion: 1,
             exportedAt: new Date().toISOString(),
             tasks: taskItems,
-            settings: { parallel, projectsParallel, startDate },
+            settings: { parallel, projectsParallel, startDate, holidays },
           }
           const saved = await fetch('/api/state', {
             method: 'PUT',
@@ -298,6 +399,7 @@ export default function App() {
           setParallel(payload.settings?.parallel ?? true)
           setProjectsParallel(payload.settings?.projectsParallel ?? false)
           setStartDate(payload.settings?.startDate ?? '2026-09-01')
+          setHolidays(payload.settings?.holidays ?? [])
         } else {
           throw new Error('共通データを読み込めませんでした。')
         }
@@ -330,7 +432,7 @@ export default function App() {
           schemaVersion: 1,
           exportedAt: new Date().toISOString(),
           tasks: taskItems,
-          settings: { parallel, projectsParallel, startDate },
+          settings: { parallel, projectsParallel, startDate, holidays },
         }
         const response = await fetch('/api/state', {
           method: 'PUT',
@@ -344,7 +446,7 @@ export default function App() {
           await writable.close()
         }
         localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
-        localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate }))
+        localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate, holidays }))
         setSaveStatus('saved')
       } catch {
         setSaveStatus('error')
@@ -353,7 +455,7 @@ export default function App() {
     return () => {
       if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
     }
-  }, [taskItems, parallel, projectsParallel, startDate, sharedDataReady, sharedJsonHandle])
+  }, [taskItems, parallel, projectsParallel, startDate, holidays, sharedDataReady, sharedJsonHandle])
 
   useEffect(() => {
     if (editingId !== null) {
@@ -622,30 +724,116 @@ export default function App() {
   }
 
   const updatePlannedDate = (task: Task, field: 'start' | 'end', value: string) => {
-    const scheduled = scheduleById.get(task.id)
-    let start = field === 'start' ? value : task.manualStartDate ?? scheduled?.startDate ?? ''
-    let end = field === 'end' ? value : task.manualEndDate ?? scheduled?.endDate ?? ''
-
-    if (start && end && end < start) {
-      if (field === 'start') end = start
-      else start = end
+    const taskIndex = taskItems.findIndex((item) => item.id === task.id)
+    let targetIds = [task.id]
+    if (parentTaskIds.has(task.id)) {
+      let branchEnd = taskIndex + 1
+      while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
+      const leafDescendants = taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id))
+      const runInParallel = task.execution ? task.execution === 'parallel' : parallel
+      targetIds = runInParallel
+        ? leafDescendants.map((item) => item.id)
+        : [field === 'start' ? leafDescendants[0]?.id ?? task.id : leafDescendants.at(-1)?.id ?? task.id]
     }
+    const targetIdSet = new Set(targetIds)
 
     setTaskItems((current) => current.map((item) => {
-      if (item.id !== task.id) return item
+      if (item.id === task.id && !targetIdSet.has(task.id)) {
+        return field === 'start' ? { ...item, manualStartDate: undefined } : { ...item, manualEndDate: undefined }
+      }
+      if (!targetIdSet.has(item.id)) return item
+      const scheduled = scheduleById.get(item.id)
+      let start = field === 'start' ? value : item.manualStartDate ?? scheduled?.startDate ?? ''
+      let end = field === 'end' ? value : item.manualEndDate ?? scheduled?.endDate ?? ''
+      if (start && end && end < start) {
+        if (field === 'start') end = start
+        else start = end
+      }
       const next = {
         ...item,
         manualStartDate: field === 'start' ? value || undefined : start && start !== scheduled?.startDate ? start : item.manualStartDate,
         manualEndDate: field === 'end' ? value || undefined : end && end !== scheduled?.endDate ? end : item.manualEndDate,
       }
-      if (!parentTaskIds.has(item.id) && start && end && value) {
-        const days = businessDaysInclusive(start, end)
+      if (start && end && value) {
+        const days = businessDaysInclusive(start, end, holidaySet)
         next.days = days
         next.dayValue = days
         next.unit = 'day'
       }
       return next
     }))
+  }
+
+  const updateTaskExecution = (task: Task, value: 'default' | 'sequence' | 'parallel') => {
+    const execution = value === 'default' ? undefined : value
+    const scheduled = scheduleById.get(task.id)
+    const taskIndex = taskItems.findIndex((item) => item.id === task.id)
+    let branchEnd = taskIndex + 1
+    while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
+    const leafIds = new Set(taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id)).map((item) => item.id))
+    const becomesParallel = value === 'parallel' || value === 'default' && parallel
+    const start = scheduled?.startDate
+    const end = scheduled?.endDate
+    setTaskItems((current) => current.map((item) => {
+      if (item.id === task.id) return { ...item, execution }
+      if (!becomesParallel || !start || !end || !leafIds.has(item.id)) return item
+      const days = businessDaysInclusive(start, end, holidaySet)
+      return { ...item, manualStartDate: start, manualEndDate: end, days, dayValue: days, unit: 'day' }
+    }))
+  }
+
+  const addHolidayRange = () => {
+    if (!holidayDraft) return
+    const start = new Date(`${holidayDraft}T00:00:00`)
+    const end = new Date(`${holidayEndDraft || holidayDraft}T00:00:00`)
+    const first = start <= end ? start : end
+    const last = start <= end ? end : start
+    const additions: string[] = []
+    for (const date = new Date(first); date <= last; date.setDate(date.getDate() + 1)) additions.push(localDateKey(date))
+    setHolidays((current) => [...new Set([...current, ...additions])].sort())
+    setHolidayDraft('')
+    setHolidayEndDraft('')
+  }
+
+  const importHolidayIcs = async (file: File) => {
+    try {
+      const imported = holidaysFromIcs(await file.text())
+      if (imported.length === 0) throw new Error('休日として読み込める予定がありませんでした。')
+      if (!confirm(`${file.name}から${imported.length}日分を休日として取り込みますか？`)) return
+      const addedDates = imported.filter((date) => !holidays.includes(date))
+      setHolidays((current) => [...new Set([...current, ...imported])].sort())
+      setLastIcsImport({ name: file.name, addedDates })
+      alert(`${addedDates.length}日分を新しく休日として取り込みました。`)
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'ICSファイルを読み込めませんでした。')
+    } finally {
+      if (icsImportRef.current) icsImportRef.current.value = ''
+    }
+  }
+
+  const undoLastIcsImport = () => {
+    if (!lastIcsImport) return
+    setHolidays((current) => current.filter((date) => !lastIcsImport.addedDates.includes(date)))
+    setLastIcsImport(null)
+  }
+
+  const selectHolidayOnSchedule = (date: string, extendRange: boolean) => {
+    if (extendRange && holidayAnchor) {
+      const start = new Date(`${holidayAnchor}T00:00:00`)
+      const end = new Date(`${date}T00:00:00`)
+      const first = start <= end ? start : end
+      const last = start <= end ? end : start
+      const additions: string[] = []
+      for (const cursor = new Date(first); cursor <= last; cursor.setDate(cursor.getDate() + 1)) additions.push(localDateKey(cursor))
+      setHolidays((current) => holidayRangeAction === 'remove'
+        ? current.filter((item) => !additions.includes(item))
+        : [...new Set([...current, ...additions])].sort())
+    } else {
+      const removing = holidays.includes(date)
+      setHolidayRangeAction(removing ? 'remove' : 'add')
+      setHolidays((current) => removing ? current.filter((item) => item !== date) : [...current, date].sort())
+    }
+    setHolidayAnchor(date)
   }
 
   const setTaskCompletion = (taskId: number, completed: boolean) => {
@@ -830,7 +1018,7 @@ export default function App() {
                   </button>
                 )}
               </div>
-              <select
+              {parentTaskIds.has(task.id) ? <select
                 className="task-execution-select"
                 aria-label={`${task.name}の子タスク実行方法`}
                 title="このタスクの直下にある子タスクの実行方法"
@@ -839,24 +1027,20 @@ export default function App() {
                 onKeyDown={(event) => event.stopPropagation()}
                 onChange={(event) => {
                   event.stopPropagation()
-                  setTaskItems((current) => current.map((item) =>
-                    item.id === task.id
-                      ? { ...item, execution: event.target.value === 'default' ? undefined : event.target.value as 'sequence' | 'parallel' }
-                      : item,
-                  ))
+                  updateTaskExecution(task, event.target.value as 'default' | 'sequence' | 'parallel')
                 }}
               >
                 <option value="default">既定</option>
                 <option value="sequence">順番</option>
                 <option value="parallel">並列</option>
-              </select>
+              </select> : <span className="task-execution-empty" aria-label="最下層タスクのため実行方法なし">—</span>}
               <div className="task-date-cell">
                 <input
                   className="task-date-input"
                   type="date"
                   aria-label={`${task.name}の予定開始日`}
                   title="予定開始日。空欄に戻すと自動計算になります"
-                  value={task.manualStartDate ?? task.plannedStartAtCompletion ?? scheduleById.get(task.id)?.startDate ?? ''}
+                  value={parentTaskIds.has(task.id) ? scheduleById.get(task.id)?.startDate ?? '' : task.manualStartDate ?? task.plannedStartAtCompletion ?? scheduleById.get(task.id)?.startDate ?? ''}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                   onChange={(event) => updatePlannedDate(task, 'start', event.target.value)}
@@ -869,7 +1053,7 @@ export default function App() {
                   type="date"
                   aria-label={`${task.name}の予定終了日`}
                   title="予定終了日。空欄に戻すと自動計算になります"
-                  value={task.manualEndDate ?? task.plannedEndAtCompletion ?? scheduleById.get(task.id)?.endDate ?? ''}
+                  value={parentTaskIds.has(task.id) ? scheduleById.get(task.id)?.endDate ?? '' : task.manualEndDate ?? task.plannedEndAtCompletion ?? scheduleById.get(task.id)?.endDate ?? ''}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                   onChange={(event) => updatePlannedDate(task, 'end', event.target.value)}
@@ -961,6 +1145,11 @@ export default function App() {
             <div className="view-switch" aria-label="表示方法">
               <button className={viewMode === 'gantt' ? 'active' : ''} type="button" onClick={() => setViewMode('gantt')}>ガント</button>
               <button className={viewMode === 'calendar' ? 'active' : ''} type="button" onClick={() => setViewMode('calendar')}>カレンダー</button>
+              <button className={holidayEditMode ? 'active holiday-mode' : ''} type="button" aria-pressed={holidayEditMode} onClick={() => {
+                setHolidayEditMode((current) => !current)
+                setHolidayAnchor('')
+                setHolidayRangeAction(null)
+              }}>休日編集</button>
             </div>
           </div>
           {viewMode === 'gantt' ? (
@@ -970,7 +1159,12 @@ export default function App() {
                   {schedule.weeks.map((week) => <span key={week.label}>{week.label}</span>)}
                 </div>
                 <div className="date-axis" style={{ gridTemplateColumns: `repeat(${schedule.workdays.length}, 1fr)` }}>
-                  {schedule.workdays.map((date, index) => <span className={weekStartIndexes.has(index) ? 'week-start' : ''} key={`${date}-${index}`}>{date}</span>)}
+                  {schedule.workdays.map((date, index) => <span
+                    className={`${weekStartIndexes.has(index) ? 'week-start ' : ''}${schedule.isoDates[index] === today ? 'today ' : ''}${holidayEditMode ? 'holiday-editable' : ''}`}
+                    key={`${date}-${index}`}
+                    title={holidayEditMode ? 'クリックで休日。Shift＋クリックで範囲指定' : undefined}
+                    onClick={(event) => { if (holidayEditMode) selectHolidayOnSchedule(schedule.isoDates[index], event.shiftKey) }}
+                  >{date}</span>)}
                 </div>
               </div>
               {visibleTasks.map((task, visibleIndex) => {
@@ -983,6 +1177,7 @@ export default function App() {
                   {[...weekStartIndexes].map((index) => (
                     <span className="week-line" key={index} style={{ left: `${(index / schedule.workdays.length) * 100}%` }} />
                   ))}
+                  {todayIndex >= 0 && <span className="today-line" style={{ left: `${((todayIndex + 0.5) / schedule.workdays.length) * 100}%` }} />}
                   {item && item.days > 0 && <div
                     className={`gantt-bar${item.parent ? ' parent-bar' : ''}${item.completed ? ' completed' : ''}`}
                     style={{
@@ -1006,7 +1201,12 @@ export default function App() {
                 <div className="calendar-week" key={weekIndex}>
                   <div className="calendar-date-row">
                     {week.days.map((date) => (
-                      <div className={`calendar-day${date.getDay() === 0 ? ' weekend sunday' : date.getDay() === 6 ? ' weekend saturday' : ''}`} key={date.toISOString()}>
+                      <div
+                        className={`calendar-day${date.getDay() === 0 ? ' weekend sunday' : date.getDay() === 6 ? ' weekend saturday' : ''}${holidaySet.has(localDateKey(date)) ? ' holiday' : ''}${localDateKey(date) === today ? ' today' : ''}${holidayEditMode ? ' holiday-editable' : ''}`}
+                        key={date.toISOString()}
+                        title={holidayEditMode ? 'クリックで休日を切替。Shift＋クリックで範囲指定' : undefined}
+                        onClick={(event) => { if (holidayEditMode) selectHolidayOnSchedule(localDateKey(date), event.shiftKey) }}
+                      >
                         <div className="calendar-date">{date.getMonth() + 1}/{date.getDate()}</div>
                       </div>
                     ))}
@@ -1045,6 +1245,32 @@ export default function App() {
               </select>
             </label>
             <p className="setting-note">個別指定がない親タスクに適用されます。</p>
+            <div className="holiday-settings">
+              <h3>休日設定</h3>
+              <p className="setting-note">土日に加えて、祝日や任意の休業日を営業日計算から除外します。</p>
+              <div className="holiday-add-row">
+                <label><span>開始</span><input type="date" value={holidayDraft} onChange={(event) => {
+                  setHolidayDraft(event.target.value)
+                  if (holidayEndDraft && event.target.value > holidayEndDraft) setHolidayEndDraft(event.target.value)
+                }} /></label>
+                <label><span>終了（省略可）</span><input type="date" min={holidayDraft || undefined} value={holidayEndDraft} onChange={(event) => setHolidayEndDraft(event.target.value)} /></label>
+                <button type="button" disabled={!holidayDraft} onClick={addHolidayRange}>{holidayEndDraft && holidayEndDraft !== holidayDraft ? '範囲を休日に追加' : '1日を休日に追加'}</button>
+              </div>
+              <div className="holiday-list">
+                {holidays.length === 0 ? <span className="setting-note">追加の休日はありません。</span> : holidays.map((date) => (
+                  <span className="holiday-chip" key={date}>{date}<button type="button" aria-label={`${date}を休日から削除`} onClick={() => setHolidays((current) => current.filter((item) => item !== date))}>×</button></span>
+                ))}
+              </div>
+              <div className="holiday-ics-tools">
+                <button type="button" onClick={() => icsImportRef.current?.click()}>休日ICSを取り込む</button>
+                {lastIcsImport && <button type="button" onClick={undoLastIcsImport}>「{lastIcsImport.name}」の取り込みを元に戻す</button>}
+                <input ref={icsImportRef} type="file" accept="text/calendar,.ics" hidden onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) void importHolidayIcs(file)
+                }} />
+                <span className="setting-note">ICS内の予定日を休日として追加します。</span>
+              </div>
+            </div>
             {projectTasks.length > 0 && (
               <div className="project-start-settings">
                 <h3>プロジェクトごとの開始日</h3>
@@ -1064,10 +1290,11 @@ export default function App() {
             <div className="data-tools">
               <h3>バックアップ</h3>
               <p className="setting-note">タスクと設定をJSONファイルに保存・復元します。</p>
-              <p className="setting-note">共有JSONを選ぶと、そのセッション中の変更を選択ファイルにも自動保存します。各PCで同じOneDriveやネットワーク共有上のJSONを選択してください。</p>
+              <p className="setting-note">共有JSONを選ぶと選択先を記憶し、再表示後もアクセス権が残っていれば自動で読み込みます。権限が切れた場合は同じファイルをもう一度選択してください。</p>
               <p className="setting-note">複数PCからの同時編集には対応していません。最後に保存した内容が優先されます。</p>
               <div>
                 <button type="button" onClick={() => void selectSharedJson()}>共有JSONを選択</button>
+                {rememberedJsonHandle && !sharedJsonHandle && <button type="button" onClick={() => void reconnectSharedJson()}>前回の共有JSONへ再接続</button>}
                 {sharedJsonHandle && <button type="button" onClick={() => void loadSharedJson(sharedJsonHandle, true)}>共有JSONを再読込</button>}
                 <button type="button" onClick={exportBackup}>JSONをエクスポート</button>
                 <button type="button" onClick={() => importRef.current?.click()}>JSONをインポート</button>

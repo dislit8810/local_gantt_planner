@@ -123,6 +123,7 @@ body { margin: 0; min-width: 320px; }
 .task-name-input { position: relative; z-index: 1; flex: 1; min-width: 0; width: calc(100% - var(--task-level, 0) * 10px); margin-left: calc(var(--task-level, 0) * 10px); padding: 6px 7px; border: 1px solid #7ba9e8; border-radius: 5px; font: inherit; }
 .task-execution-select { justify-self: center; width: 62px; padding: 4px 2px; border: 1px solid #cbd5e1; border-radius: 5px; color: #475569; background: #fff; font-size: 11px; cursor: pointer; }
 .task-row.completed .task-execution-select { color: #7b8491; background: #f4f5f7; }
+.task-execution-empty { justify-self: center; color: #94a3b8; font-size: 12px; }
 .delete-task { position: absolute; right: 5px; width: 26px; height: 26px; border: 0; border-radius: 5px; background: transparent; color: #748197; cursor: pointer; }
 .delete-task:hover { color: #b42318; background: #feeceb; }
 .duration-button { justify-self: end; padding: 5px 7px; border: 0; border-radius: 5px; background: transparent; color: #607086; cursor: pointer; }
@@ -153,6 +154,21 @@ body { margin: 0; min-width: 320px; }
 .calendar-day { min-height: 44px; padding: 8px; border-right: 1px solid #e2e8f0; background: white; }
 .calendar-day.weekend { background: #f8fafc; }
 .calendar-date { margin-bottom: 7px; color: #475569; font-size: 13px; font-weight: 700; }
+.calendar-day.holiday { background: #fff7ed; }
+.calendar-day.today { position: relative; background: #fef9c3; box-shadow: inset 0 0 0 2px #f59e0b; }
+.date-axis .today { color: #92400e; background: #fef3c7; font-weight: 800; }
+.holiday-editable { cursor: pointer; }
+.date-axis .holiday-editable:hover, .calendar-day.holiday-editable:hover { background: #ffedd5; box-shadow: inset 0 0 0 2px #f97316; }
+.view-switch .holiday-mode { border-color: #f97316; color: #9a3412; background: #ffedd5; }
+.today-line { position: absolute; z-index: 2; top: 0; bottom: 0; width: 2px; pointer-events: none; background: #f59e0b; }
+.holiday-settings { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e2e8f0; }
+.holiday-settings h3 { margin: 0 0 6px; }
+.holiday-add-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.holiday-add-row label { display: grid; gap: 3px; color: #64748b; font-size: 11px; }
+.holiday-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.holiday-chip { display: inline-flex; gap: 5px; align-items: center; padding: 4px 7px; border-radius: 999px; color: #7c2d12; background: #ffedd5; font-size: 12px; }
+.holiday-chip button { padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
+.holiday-ics-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
 .calendar-bars { align-items: start; min-height: 66px; padding: 4px 0 10px; row-gap: 5px; background: linear-gradient(to right, transparent calc(100% - 1px), #e2e8f0 calc(100% - 1px)); background-size: calc(100% / 7) 100%; }
 .calendar-task { z-index: 1; min-width: 0; margin: 0 2px; padding: 6px 7px; overflow: hidden; border-left: 3px solid #2563eb; border-radius: 4px; color: #1e3a8a; background: #dbeafe; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .calendar-task.completed { border-color: #94a3b8; color: #64748b; background: #e2e8f0; text-decoration: line-through; }

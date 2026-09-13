@@ -20,11 +20,15 @@ function buildTree(tasks: Task[]) {
   return roots
 }
 
-function addBusinessDays(date: Date, count: number) {
+function isBusinessDay(date: Date, holidays: Set<string>) {
+  return date.getDay() !== 0 && date.getDay() !== 6 && !holidays.has(localDateKey(date))
+}
+
+function addBusinessDays(date: Date, count: number, holidays: Set<string>) {
   const result = new Date(date)
   let added = 0
   while (added < count) {
-    if (result.getDay() !== 0 && result.getDay() !== 6) added += 1
+    if (isBusinessDay(result, holidays)) added += 1
     if (added < count) result.setDate(result.getDate() + 1)
   }
   return result
@@ -44,43 +48,44 @@ function localDateKey(date: Date) {
   return `${year}-${month}-${day}`
 }
 
-function nextBusinessDay(date: Date) {
+function nextBusinessDay(date: Date, holidays: Set<string>) {
   const result = new Date(date)
-  while (result.getDay() === 0 || result.getDay() === 6) result.setDate(result.getDate() + 1)
+  while (!isBusinessDay(result, holidays)) result.setDate(result.getDate() + 1)
   return result
 }
 
-function businessDayOffset(origin: Date, target: Date) {
-  const normalizedTarget = nextBusinessDay(target)
+function businessDayOffset(origin: Date, target: Date, holidays: Set<string>) {
+  const normalizedTarget = nextBusinessDay(target, holidays)
   const cursor = new Date(origin)
   let offset = 0
   while (localDateKey(cursor) < localDateKey(normalizedTarget)) {
     cursor.setDate(cursor.getDate() + 1)
-    if (cursor.getDay() !== 0 && cursor.getDay() !== 6) offset += 1
+    if (isBusinessDay(cursor, holidays)) offset += 1
   }
   return offset
 }
 
-function businessDayEndOffset(origin: Date, target: Date) {
-  const offset = businessDayOffset(origin, target)
-  return target.getDay() === 0 || target.getDay() === 6 ? offset : offset + 1
+function businessDayEndOffset(origin: Date, target: Date, holidays: Set<string>) {
+  const offset = businessDayOffset(origin, target, holidays)
+  return isBusinessDay(target, holidays) ? offset + 1 : offset
 }
 
-export function calculateSchedule(tasks: Task[], parallelChildren: boolean, parallelProjects: boolean, startDateText: string) {
+export function calculateSchedule(tasks: Task[], parallelChildren: boolean, parallelProjects: boolean, startDateText: string, holidayDates: string[] = []) {
+  const holidays = new Set(holidayDates)
   const rows = new Map<number, ScheduleRow>()
   const roots = buildTree(tasks)
   const requestedStartDates = [
     startDateText,
     ...roots.map((root) => root.task.projectStartDate).filter(Boolean) as string[],
-    ...tasks.map((task) => task.manualStartDate).filter(Boolean) as string[],
+    ...tasks.filter((task, index) => !tasks[index + 1] || tasks[index + 1].level <= task.level).map((task) => task.manualStartDate).filter(Boolean) as string[],
     ...tasks.map((task) => task.actualStartDate).filter(Boolean) as string[],
   ]
   const originText = requestedStartDates.sort()[0] ?? startDateText
-  const startDate = nextBusinessDay(new Date(`${originText}T00:00:00`))
+  const startDate = nextBusinessDay(new Date(`${originText}T00:00:00`), holidays)
 
   const scheduleNode = (node: Node, start: number): number => {
-    const scheduledStart = node.task.manualStartDate
-      ? businessDayOffset(startDate, new Date(`${node.task.manualStartDate}T00:00:00`))
+    const scheduledStart = node.children.length === 0 && node.task.manualStartDate
+      ? businessDayOffset(startDate, new Date(`${node.task.manualStartDate}T00:00:00`), holidays)
       : start
 
     if (node.children.length === 0) {
@@ -90,16 +95,16 @@ export function calculateSchedule(tasks: Task[], parallelChildren: boolean, para
           return start
         }
         const actualStart = node.task.actualStartDate
-          ? businessDayOffset(startDate, new Date(`${node.task.actualStartDate}T00:00:00`))
+          ? businessDayOffset(startDate, new Date(`${node.task.actualStartDate}T00:00:00`), holidays)
           : scheduledStart
-        const actualEnd = businessDayEndOffset(startDate, new Date(`${node.task.actualEndDate}T00:00:00`))
+        const actualEnd = businessDayEndOffset(startDate, new Date(`${node.task.actualEndDate}T00:00:00`), holidays)
         const end = Math.max(actualStart + 0.5, actualEnd)
         rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: actualStart, days: end - actualStart, parent: false, completed: true })
         return Math.max(start, end)
       }
       const automaticDays = Math.max(0.5, node.task.days || 1)
       const requestedEnd = node.task.manualEndDate
-        ? businessDayEndOffset(startDate, new Date(`${node.task.manualEndDate}T00:00:00`))
+        ? businessDayEndOffset(startDate, new Date(`${node.task.manualEndDate}T00:00:00`), holidays)
         : scheduledStart + automaticDays
       const end = Math.max(scheduledStart + automaticDays, requestedEnd)
       rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: scheduledStart, days: end - scheduledStart, parent: false, completed: node.task.completed ?? false })
@@ -115,35 +120,34 @@ export function calculateSchedule(tasks: Task[], parallelChildren: boolean, para
     }
     if (node.task.completed && node.task.actualEndDate) {
       const actualStart = node.task.actualStartDate
-        ? businessDayOffset(startDate, new Date(`${node.task.actualStartDate}T00:00:00`))
+        ? businessDayOffset(startDate, new Date(`${node.task.actualStartDate}T00:00:00`), holidays)
         : scheduledStart
-      const actualEnd = businessDayEndOffset(startDate, new Date(`${node.task.actualEndDate}T00:00:00`))
+      const actualEnd = businessDayEndOffset(startDate, new Date(`${node.task.actualEndDate}T00:00:00`), holidays)
       const completedEnd = Math.max(actualStart + 0.5, actualEnd)
       rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: actualStart, days: completedEnd - actualStart, parent: true, completed: true })
       return Math.max(start, completedEnd)
     }
-    if (node.task.manualEndDate) {
-      const requestedEnd = businessDayEndOffset(startDate, new Date(`${node.task.manualEndDate}T00:00:00`))
-      end = Math.max(end, requestedEnd)
-    }
-    rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: scheduledStart, days: end - scheduledStart, parent: true, completed: node.task.completed ?? false })
+    const childRows = node.children.map((child) => rows.get(child.task.id)).filter(Boolean) as ScheduleRow[]
+    const aggregateStart = childRows.length ? Math.min(...childRows.map((row) => row.start)) : scheduledStart
+    const aggregateEnd = childRows.length ? Math.max(...childRows.map((row) => row.start + row.days)) : end
+    rows.set(node.task.id, { id: node.task.id, name: node.task.name, start: aggregateStart, days: Math.max(0, aggregateEnd - aggregateStart), parent: true, completed: node.task.completed ?? false })
     return Math.max(start, end)
   }
 
   let projectEnd = 0
   if (parallelProjects) {
     projectEnd = Math.max(0, ...roots.map((root) => {
-      const requested = root.task.completed ? 0 : businessDayOffset(startDate, new Date(`${root.task.projectStartDate ?? startDateText}T00:00:00`))
+      const requested = root.task.completed ? 0 : businessDayOffset(startDate, new Date(`${root.task.projectStartDate ?? startDateText}T00:00:00`), holidays)
       return scheduleNode(root, requested)
     }))
   } else {
     for (const root of roots) {
-      const requested = root.task.completed ? projectEnd : businessDayOffset(startDate, new Date(`${root.task.projectStartDate ?? startDateText}T00:00:00`))
+      const requested = root.task.completed ? projectEnd : businessDayOffset(startDate, new Date(`${root.task.projectStartDate ?? startDateText}T00:00:00`), holidays)
       projectEnd = scheduleNode(root, Math.max(projectEnd, requested))
     }
   }
   const columnCount = Math.max(14, Math.ceil(projectEnd))
-  const dates = Array.from({ length: columnCount }, (_, index) => addBusinessDays(startDate, index + 1))
+  const dates = Array.from({ length: columnCount }, (_, index) => addBusinessDays(startDate, index + 1, holidays))
   const workdays = dates.map((date) => `${date.getMonth() + 1}/${date.getDate()}`)
   const weeks: { label: string; days: number }[] = []
   for (const date of dates) {
