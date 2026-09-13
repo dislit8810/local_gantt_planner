@@ -21,11 +21,14 @@ export type Task = {
   plannedEndAtCompletion?: string
 }
 
+type PresetTask = Pick<Task, 'name' | 'days' | 'level' | 'unit' | 'dayValue' | 'weekValue' | 'execution'>
+type ProjectPreset = { id: string; name: string; tasks: PresetTask[] }
+
 type BackupPayload = {
   schemaVersion: 1
   exportedAt: string
   tasks: Task[]
-  settings: { parallel: boolean; projectsParallel: boolean; startDate: string; holidays?: string[] }
+  settings: { parallel: boolean; projectsParallel: boolean; startDate: string; holidays?: string[]; presets?: ProjectPreset[] }
 }
 
 type SharedJsonHandle = {
@@ -142,7 +145,7 @@ const loadStoredTasks = (): Task[] => {
 const loadStoredSettings = () => {
   try {
     const stored = localStorage.getItem(settingsStorageKey)
-    return stored ? JSON.parse(stored) as { parallel?: boolean; projectsParallel?: boolean; startDate?: string; holidays?: string[] } : {}
+    return stored ? JSON.parse(stored) as { parallel?: boolean; projectsParallel?: boolean; startDate?: string; holidays?: string[]; presets?: ProjectPreset[] } : {}
   } catch {
     return {}
   }
@@ -163,8 +166,13 @@ export default function App() {
   const storedSettings = loadStoredSettings()
   const [parallel, setParallel] = useState(storedSettings.parallel ?? true)
   const [projectsParallel, setProjectsParallel] = useState(storedSettings.projectsParallel ?? false)
-  const [startDate, setStartDate] = useState(storedSettings.startDate ?? '2026-09-01')
+  const [startDate, setStartDate] = useState(localToday)
   const [holidays, setHolidays] = useState<string[]>(storedSettings.holidays ?? [])
+  const [presets, setPresets] = useState<ProjectPreset[]>(storedSettings.presets ?? [])
+  const [newProjectPresetId, setNewProjectPresetId] = useState('')
+  const [presetSourceId, setPresetSourceId] = useState('')
+  const [presetName, setPresetName] = useState('')
+  const [editingPresetId, setEditingPresetId] = useState('')
   const [holidayDraft, setHolidayDraft] = useState('')
   const [holidayEndDraft, setHolidayEndDraft] = useState('')
   const [holidayEditMode, setHolidayEditMode] = useState(false)
@@ -264,8 +272,9 @@ export default function App() {
     })))
     setParallel(payload.settings?.parallel ?? true)
     setProjectsParallel(payload.settings?.projectsParallel ?? false)
-    setStartDate(payload.settings?.startDate ?? '2026-09-01')
+    setStartDate(localToday())
     setHolidays(payload.settings?.holidays ?? [])
+    setPresets(payload.settings?.presets ?? [])
     setEditingId(null)
     setDurationEditingId(null)
     setSelectedId(null)
@@ -320,7 +329,7 @@ export default function App() {
       schemaVersion: 1,
       exportedAt: new Date().toISOString(),
       tasks: taskItems,
-      settings: { parallel, projectsParallel, startDate, holidays },
+      settings: { parallel, projectsParallel, startDate, holidays, presets },
     }
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
@@ -379,7 +388,7 @@ export default function App() {
             schemaVersion: 1,
             exportedAt: new Date().toISOString(),
             tasks: taskItems,
-            settings: { parallel, projectsParallel, startDate, holidays },
+            settings: { parallel, projectsParallel, startDate, holidays, presets },
           }
           const saved = await fetch('/api/state', {
             method: 'PUT',
@@ -398,8 +407,9 @@ export default function App() {
           })))
           setParallel(payload.settings?.parallel ?? true)
           setProjectsParallel(payload.settings?.projectsParallel ?? false)
-          setStartDate(payload.settings?.startDate ?? '2026-09-01')
+          setStartDate(localToday())
           setHolidays(payload.settings?.holidays ?? [])
+          setPresets(payload.settings?.presets ?? [])
         } else {
           throw new Error('共通データを読み込めませんでした。')
         }
@@ -432,7 +442,7 @@ export default function App() {
           schemaVersion: 1,
           exportedAt: new Date().toISOString(),
           tasks: taskItems,
-          settings: { parallel, projectsParallel, startDate, holidays },
+          settings: { parallel, projectsParallel, startDate, holidays, presets },
         }
         const response = await fetch('/api/state', {
           method: 'PUT',
@@ -446,7 +456,7 @@ export default function App() {
           await writable.close()
         }
         localStorage.setItem(tasksStorageKey, JSON.stringify(taskItems))
-        localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate, holidays }))
+        localStorage.setItem(settingsStorageKey, JSON.stringify({ parallel, projectsParallel, startDate, holidays, presets }))
         setSaveStatus('saved')
       } catch {
         setSaveStatus('error')
@@ -455,7 +465,7 @@ export default function App() {
     return () => {
       if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
     }
-  }, [taskItems, parallel, projectsParallel, startDate, holidays, sharedDataReady, sharedJsonHandle])
+  }, [taskItems, parallel, projectsParallel, startDate, holidays, presets, sharedDataReady, sharedJsonHandle])
 
   useEffect(() => {
     if (editingId !== null) {
@@ -523,8 +533,37 @@ export default function App() {
 
   const addTitleTask = () => {
     const id = nextId()
-    setTaskItems((current) => [...current, { id, name: '', days: 1, level: 0, unit: 'day', dayValue: 1, weekValue: 1, completed: false }])
+    const preset = presets.find((item) => item.id === newProjectPresetId)
+    const root: Task = { id, name: '', days: preset ? 0 : 1, level: 0, unit: 'day', dayValue: 1, weekValue: 1, completed: false }
+    const presetTasks: Task[] = (preset?.tasks ?? []).map((item, index) => ({
+      ...item,
+      id: id + index + 1,
+      completed: false,
+      collapsed: false,
+    }))
+    setTaskItems((current) => [...current, root, ...presetTasks])
     setEditingId(id)
+  }
+
+  const saveProjectPreset = () => {
+    const sourceId = Number(presetSourceId)
+    const sourceIndex = taskItems.findIndex((item) => item.id === sourceId && item.level === 0)
+    if (sourceIndex < 0) return
+    let end = sourceIndex + 1
+    while (end < taskItems.length && taskItems[end].level > 0) end += 1
+    const tasks = taskItems.slice(sourceIndex + 1, end).map(({ name, days, level, unit, dayValue, weekValue, execution }) => ({ name, days, level, unit, dayValue, weekValue, execution }))
+    if (tasks.length === 0) {
+      alert('配下にタスクがあるプロジェクトを選んでください。')
+      return
+    }
+    const name = presetName.trim() || taskItems[sourceIndex].name.trim()
+    if (!name) return
+    setPresets((current) => [...current, { id: crypto.randomUUID?.() ?? `${Date.now()}`, name, tasks }])
+    setPresetName('')
+  }
+
+  const updatePreset = (presetId: string, updater: (preset: ProjectPreset) => ProjectPreset) => {
+    setPresets((current) => current.map((preset) => preset.id === presetId ? updater(preset) : preset))
   }
 
   const changeTaskLevel = (task: Task, direction: 1 | -1) => {
@@ -941,8 +980,8 @@ export default function App() {
             {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? sharedJsonName ? `${sharedJsonName}に保存済み` : '共通データに保存済み' : '共通データに保存できません'}
           </span>
           <label>
-            開始日
-          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+            今日
+          <input type="date" value={startDate} readOnly aria-label="今日の日付" title="全体の基準日は今日です。開始日はプロジェクトごとに設定します" />
           </label>
           <button className="settings-button" type="button" aria-label="設定を開く" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
@@ -1117,7 +1156,14 @@ export default function App() {
             </div>
             )
           })}
-          <div className="add-actions"><button className="add-task" type="button" onClick={addTitleTask}>＋ プロジェクト追加</button><button className="add-task" type="button" onClick={addRootTask}>＋ タスク追加</button></div>
+          <div className="add-actions">
+            <select aria-label="新しいプロジェクトのプリセット" value={newProjectPresetId} onChange={(event) => setNewProjectPresetId(event.target.value)}>
+              <option value="">空のプロジェクト</option>
+              {presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+            </select>
+            <button className="add-task" type="button" onClick={addTitleTask}>＋ プロジェクト追加</button>
+            <button className="add-task" type="button" onClick={addRootTask}>＋ タスク追加</button>
+          </div>
         </div>
         <div
           className="panel-resizer"
@@ -1280,13 +1326,59 @@ export default function App() {
                     <span>{task.name}</span>
                     <input
                       type="date"
-                      value={task.projectStartDate ?? ''}
+                      value={scheduleById.get(task.id)?.startDate ?? task.projectStartDate ?? ''}
                       onChange={(event) => setTaskItems((current) => current.map((item) => item.id === task.id ? { ...item, projectStartDate: event.target.value || undefined } : item))}
                     />
                   </label>
                 ))}
               </div>
             )}
+            <div className="preset-settings">
+              <h3>プロジェクトプリセット</h3>
+              <p className="setting-note">既存プロジェクトのタスク構成を、日付・完了状態を除いて再利用します。</p>
+              <div className="preset-create-row">
+                <select value={presetSourceId} onChange={(event) => {
+                  setPresetSourceId(event.target.value)
+                  const project = projectTasks.find((item) => item.id === Number(event.target.value))
+                  if (project) setPresetName(project.name)
+                }}>
+                  <option value="">元にするプロジェクトを選択</option>
+                  {projectTasks.map((task) => <option key={task.id} value={task.id}>{task.name}</option>)}
+                </select>
+                <input type="text" placeholder="プリセット名" value={presetName} onChange={(event) => setPresetName(event.target.value)} />
+                <button type="button" disabled={!presetSourceId} onClick={saveProjectPreset}>プリセットとして保存</button>
+              </div>
+              <div className="preset-list">
+                {presets.length === 0 ? <span className="setting-note">保存済みプリセットはありません。</span> : presets.map((preset) => (
+                  <span className="preset-chip" key={preset.id}>{preset.name}<small>{preset.tasks.length}件</small><button type="button" onClick={() => setEditingPresetId((current) => current === preset.id ? '' : preset.id)}>編集</button><button type="button" aria-label={`${preset.name}を削除`} onClick={() => {
+                    setPresets((current) => current.filter((item) => item.id !== preset.id))
+                    setNewProjectPresetId((current) => current === preset.id ? '' : current)
+                    setEditingPresetId((current) => current === preset.id ? '' : current)
+                  }}>×</button></span>
+                ))}
+              </div>
+              {presets.filter((preset) => preset.id === editingPresetId).map((preset) => (
+                <div className="preset-editor" key={preset.id}>
+                  <label>プリセット名<input value={preset.name} onChange={(event) => updatePreset(preset.id, (current) => ({ ...current, name: event.target.value }))} /></label>
+                  <div className="preset-editor-heading"><span>タスク名</span><span>階層</span><span>日数</span><span>単位</span><span>実行</span><span /></div>
+                  {preset.tasks.map((task, index) => {
+                    const isParent = preset.tasks[index + 1]?.level > task.level
+                    return <div className="preset-task-row" key={index}>
+                      <input value={task.name} style={{ paddingLeft: `${8 + Math.max(0, task.level - 1) * 14}px` }} onChange={(event) => updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) }))} />
+                      <div className="preset-level-buttons"><button type="button" disabled={task.level <= 1} onClick={() => updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, level: item.level - 1 } : item) }))}>−</button><span>{task.level}</span><button type="button" disabled={index === 0 || task.level >= preset.tasks[index - 1].level + 1} onClick={() => updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, level: item.level + 1 } : item) }))}>＋</button></div>
+                      <input type="number" min="0.5" step={task.unit === 'week' ? '0.5' : '1'} value={task.unit === 'week' ? task.weekValue ?? task.days / 5 : task.dayValue ?? task.days} onChange={(event) => {
+                        const value = Math.max(task.unit === 'week' ? 0.5 : 1, Number(event.target.value) || 1)
+                        updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, days: task.unit === 'week' ? value * 5 : value, ...(task.unit === 'week' ? { weekValue: value } : { dayValue: value }) } : item) }))
+                      }} />
+                      <select value={task.unit} onChange={(event) => updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value as 'day' | 'week', days: event.target.value === 'week' ? (item.weekValue ?? 1) * 5 : item.dayValue ?? 1 } : item) }))}><option value="day">日</option><option value="week">週</option></select>
+                      {isParent ? <select value={task.execution ?? 'default'} onChange={(event) => updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.map((item, itemIndex) => itemIndex === index ? { ...item, execution: event.target.value === 'default' ? undefined : event.target.value as 'sequence' | 'parallel' } : item) }))}><option value="default">既定</option><option value="sequence">順番</option><option value="parallel">並列</option></select> : <span>—</span>}
+                      <button type="button" aria-label={`${task.name}を削除`} onClick={() => updatePreset(preset.id, (current) => ({ ...current, tasks: current.tasks.filter((_, itemIndex) => itemIndex !== index) }))}>×</button>
+                    </div>
+                  })}
+                  <div className="preset-editor-actions"><button type="button" onClick={() => updatePreset(preset.id, (current) => ({ ...current, tasks: [...current.tasks, { name: '新しいタスク', days: 1, level: 1, unit: 'day', dayValue: 1, weekValue: 1 }] }))}>＋ タスク追加</button><button type="button" onClick={() => setEditingPresetId('')}>編集を閉じる</button></div>
+                </div>
+              ))}
+            </div>
             <div className="data-tools">
               <h3>バックアップ</h3>
               <p className="setting-note">タスクと設定をJSONファイルに保存・復元します。</p>
