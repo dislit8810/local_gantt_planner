@@ -67,11 +67,12 @@ body { margin: 0; min-width: 320px; }
   border: 1px solid var(--project-color, #8fa8c5);
   border-bottom-color: #b8c8da;
   border-radius: 9px 9px 0 0;
-  background: #eaf2fc;
+  background: color-mix(in srgb, var(--project-color, #8fa8c5) 16%, #fff);
 }
 .task-row.project-end { border-bottom: 1px solid #8fa8c5; border-radius: 0 0 9px 9px; margin-bottom: 12px; }
 .task-row.project-row.project-end { border-radius: 9px; }
-.task-row.parent-task { background: #f4f7fb; }
+.task-row.in-project:not(.project-row) { background: color-mix(in srgb, var(--project-color, #8fa8c5) 4%, #fff); }
+.task-row.parent-task { background: color-mix(in srgb, var(--project-color, #8fa8c5) 9%, #fff); }
 .task-row.project-row .task-name-button,
 .task-row.project-row .task-name-input { font-weight: 700; }
 .task-row.parent-task .task-name-button,
@@ -105,10 +106,10 @@ body { margin: 0; min-width: 320px; }
 }
 .row-leading { position: relative; z-index: 2; display: grid; grid-template-columns: 20px 18px; align-items: center; margin-left: calc(var(--task-level, 0) * 10px); }
 .row-leading button { padding: 0; border: 0; background: transparent; cursor: pointer; }
-.task-row.editing { background: #eef6ff; }
-.task-row.selected { background: #f1f6fd; box-shadow: inset 3px 0 #3b82f6; }
-.task-row.range-selected { background: #e2edfc; }
-.task-row.range-selected.selected { background: #d8e8fb; box-shadow: inset 3px 0 #2563eb; }
+.task-row.editing { background: color-mix(in srgb, var(--project-color, #3b82f6) 13%, #fff); }
+.task-row.selected { background: color-mix(in srgb, var(--project-color, #3b82f6) 19%, #fff); box-shadow: inset 3px 0 var(--project-color, #3b82f6); }
+.task-row.range-selected { background: color-mix(in srgb, var(--project-color, #3b82f6) 14%, #fff); }
+.task-row.range-selected.selected { background: color-mix(in srgb, var(--project-color, #2563eb) 25%, #fff); box-shadow: inset 3px 0 var(--project-color, #2563eb); }
 .task-row.completed { background: #eef0f3; color: #7b8491; }
 .task-row.completed .task-name-button { color: #7b8491; text-decoration: line-through; }
 .task-row.completed .auto-duration { color: #8b94a1; }
