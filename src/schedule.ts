@@ -84,6 +84,7 @@ export function calculateSchedule(tasks: Task[], parallelChildren: boolean, para
   const startDate = nextBusinessDay(new Date(`${originText}T00:00:00`), holidays)
 
   const scheduleNode = (node: Node, start: number): number => {
+    if (node.task.scheduleExcluded) return start
     const scheduledStart = node.children.length === 0 && node.task.manualStartDate
       ? businessDayOffset(startDate, new Date(`${node.task.manualStartDate}T00:00:00`), holidays)
       : start

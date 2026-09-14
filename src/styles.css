@@ -61,9 +61,10 @@ body { margin: 0; min-width: 320px; }
 .date-heading small { margin-top: 2px; color: #8491a3; font-size: 9px; font-weight: 400; }
 .task-row { position: relative; padding-right: 32px; }
 .task-row.in-project { border-left: 1px solid #c7d3e1; border-right: 1px solid #c7d3e1; }
+.task-row.in-project { border-left-color: color-mix(in srgb, var(--project-color) 45%, #c7d3e1); }
 .task-row.project-row {
   margin-top: 12px;
-  border: 1px solid #8fa8c5;
+  border: 1px solid var(--project-color, #8fa8c5);
   border-bottom-color: #b8c8da;
   border-radius: 9px 9px 0 0;
   background: #eaf2fc;
@@ -120,6 +121,11 @@ body { margin: 0; min-width: 320px; }
 .task-name-cell { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .task-name-button { position: relative; z-index: 1; min-width: 0; padding: 0 0 0 calc(var(--task-level, 0) * 10px); border: 0; background: transparent; color: inherit; text-align: left; cursor: text; }
 .task-name-button { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schedule-toggle { flex: 0 0 auto; padding: 3px 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #8491a3; font-size: 9px; cursor: pointer; }
+.schedule-toggle:hover { border-color: #cbd5e1; background: #fff; color: #475569; }
+.schedule-toggle.excluded { border-color: #d4a72c; background: #fff8db; color: #7c5d00; }
+.task-row.schedule-excluded { background: #faf7ed; color: #8a8067; }
+.task-row.schedule-excluded .task-date-input { color: #9ca3af; cursor: not-allowed; }
 .task-name-input { position: relative; z-index: 1; flex: 1; min-width: 0; width: calc(100% - var(--task-level, 0) * 10px); margin-left: calc(var(--task-level, 0) * 10px); padding: 6px 7px; border: 1px solid #7ba9e8; border-radius: 5px; font: inherit; }
 .task-execution-select { justify-self: center; width: 62px; padding: 4px 2px; border: 1px solid #cbd5e1; border-radius: 5px; color: #475569; background: #fff; font-size: 11px; cursor: pointer; }
 .task-row.completed .task-execution-select { color: #7b8491; background: #f4f5f7; }
@@ -144,6 +150,7 @@ body { margin: 0; min-width: 320px; }
 .view-switch { display: inline-flex; padding: 3px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
 .view-switch button { padding: 6px 12px; border: 0; border-radius: 6px; color: #475569; background: transparent; cursor: pointer; }
 .view-switch button.active { color: white; background: #2563eb; }
+.view-switch button.filter-active { background: #475569; }
 .month-calendar { width: 100%; min-width: 0; padding: 8px; background: #cbd5e1; }
 .calendar-weekday-row, .calendar-date-row, .calendar-bars { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .calendar-weekday-row { position: sticky; z-index: 5; top: 0; }
@@ -185,8 +192,9 @@ body { margin: 0; min-width: 320px; }
 .preset-level-buttons button { padding: 3px; }
 .preset-editor-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
 .calendar-bars { align-items: start; min-height: 66px; padding: 4px 0 10px; row-gap: 5px; background: linear-gradient(to right, transparent calc(100% - 1px), #e2e8f0 calc(100% - 1px)); background-size: calc(100% / 7) 100%; }
-.calendar-task { z-index: 1; min-width: 0; margin: 0 2px; padding: 6px 7px; overflow: hidden; border-left: 3px solid #2563eb; border-radius: 4px; color: #1e3a8a; background: #dbeafe; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.calendar-task { z-index: 1; min-width: 0; margin: 0 2px; padding: 6px 7px; overflow: hidden; border-left: 3px solid #2563eb; border-radius: 4px; color: white; background: #dbeafe; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .calendar-task.completed { border-color: #94a3b8; color: #64748b; background: #e2e8f0; text-decoration: line-through; }
+.calendar-task.selected { z-index: 3; outline: 3px solid #facc15; outline-offset: 1px; font-weight: 800; }
 .calendar-axis { height: 76px; border-bottom: 1px solid #d9e1ea; }
 .week-axis { display: grid; height: 32px; background: #edf3fa; }
 .week-axis span { display: grid; place-items: center; border-right: 2px solid #94a3b8; color: #334155; font-size: 12px; font-weight: 600; }
@@ -197,7 +205,9 @@ body { margin: 0; min-width: 320px; }
 .gantt-row.project-start { margin-top: 12px; border-top: 1px solid #8fa8c5; }
 .gantt-row.project-end { margin-bottom: 12px; border-bottom: 1px solid #8fa8c5; }
 .week-line { position: absolute; z-index: 1; top: 0; bottom: 0; width: 2px; background: #94a3b8; pointer-events: none; }
-.gantt-bar { position: absolute; z-index: 2; top: 9px; height: 26px; display: flex; align-items: center; overflow: hidden; padding: 0 7px; border-radius: 5px; background: #3b82f6; color: white; font-size: 12px; white-space: nowrap; transition: left 180ms ease, width 180ms ease; }
+.gantt-bar { position: absolute; z-index: 2; top: 9px; height: 26px; display: flex; align-items: center; overflow: hidden; padding: 0 7px; border-radius: 5px; background: #3b82f6; color: white; font-size: 12px; white-space: nowrap; cursor: pointer; transition: left 180ms ease, width 180ms ease; }
+.gantt-row.selected { background: color-mix(in srgb, var(--project-color) 10%, #fff); }
+.gantt-row.selected .gantt-bar { z-index: 4; outline: 3px solid #facc15; outline-offset: 2px; }
 .gantt-bar.completed { background: #87919f; opacity: .55; }
 .parent-bar { top: 17px; height: 10px; padding: 0; border-radius: 3px; background: #93b9ed; }
 
@@ -215,7 +225,8 @@ body { margin: 0; min-width: 320px; }
 .parent-settings select { padding: 7px 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; }
 .project-start-settings { margin-top: 18px; padding-top: 14px; border-top: 1px solid #e2e8f0; }
 .project-start-settings h3 { margin: 0 0 6px; font-size: 15px; }
-.project-start-settings label { display: grid; grid-template-columns: 1fr 150px; align-items: center; gap: 12px; padding: 7px 0; }
+.project-start-settings label { display: grid; grid-template-columns: 1fr 44px 150px; align-items: center; gap: 12px; padding: 7px 0; }
+.project-start-settings input[type="color"] { width: 40px; height: 32px; padding: 2px; }
 .project-start-settings input { padding: 7px 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
 .data-tools { margin-top: 18px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
 .data-tools h3 { margin: 0 0 6px; font-size: 15px; }

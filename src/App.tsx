@@ -19,6 +19,8 @@ export type Task = {
   actualEndDate?: string
   plannedStartAtCompletion?: string
   plannedEndAtCompletion?: string
+  projectColor?: string
+  scheduleExcluded?: boolean
 }
 
 type PresetTask = Pick<Task, 'name' | 'days' | 'level' | 'unit' | 'dayValue' | 'weekValue' | 'execution'>
@@ -173,6 +175,8 @@ export default function App() {
   const [presetSourceId, setPresetSourceId] = useState('')
   const [presetName, setPresetName] = useState('')
   const [editingPresetId, setEditingPresetId] = useState('')
+  const [hideCompletedProjects, setHideCompletedProjects] = useState(false)
+  const [hideFutureProjects, setHideFutureProjects] = useState(false)
   const [holidayDraft, setHolidayDraft] = useState('')
   const [holidayEndDraft, setHolidayEndDraft] = useState('')
   const [holidayEditMode, setHolidayEditMode] = useState(false)
@@ -218,7 +222,27 @@ export default function App() {
   const projectTasks = taskItems.filter((task) => task.level === 0)
   const parentTaskIds = new Set(parentTasks.map((task) => task.id))
   const scheduleById = new Map(schedule.rows.map((row) => [row.id, row]))
+  const projectPalette = ['#2563eb', '#7c3aed', '#059669', '#ea580c', '#db2777', '#0891b2', '#65a30d', '#9333ea']
+  const projectIdByTaskId = new Map<number, number>()
+  const projectColorByTaskId = new Map<number, string>()
+  let currentProjectId = 0
+  let currentProjectColor = projectPalette[0]
+  let projectIndex = -1
+  for (const task of taskItems) {
+    if (task.level === 0) {
+      projectIndex += 1
+      currentProjectId = task.id
+      currentProjectColor = task.projectColor ?? projectPalette[projectIndex % projectPalette.length]
+    }
+    projectIdByTaskId.set(task.id, currentProjectId)
+    projectColorByTaskId.set(task.id, currentProjectColor)
+  }
+  const hiddenProjectIds = new Set(projectTasks.filter((project) => {
+    const row = scheduleById.get(project.id)
+    return hideCompletedProjects && project.completed || hideFutureProjects && Boolean(row?.startDate && row.startDate > today)
+  }).map((project) => project.id))
   const visibleTasks = taskItems.filter((task, index) => {
+    if (hiddenProjectIds.has(projectIdByTaskId.get(task.id) ?? 0)) return false
     let ancestorLevel = task.level
     for (let previous = index - 1; previous >= 0 && ancestorLevel > 0; previous -= 1) {
       const candidate = taskItems[previous]
@@ -693,14 +717,26 @@ export default function App() {
         while (previousStart >= 0 && current[previousStart].level > task.level) previousStart -= 1
         if (previousStart < 0 || current[previousStart].level !== task.level) return current
         const previousBlock = current.slice(previousStart, start)
-        return [...current.slice(0, previousStart), ...currentBlock, ...previousBlock, ...current.slice(end)]
+        const reordered = [...current.slice(0, previousStart), ...currentBlock, ...previousBlock, ...current.slice(end)]
+        let projectStart = start
+        while (projectStart > 0 && current[projectStart].level !== 0) projectStart -= 1
+        const projectId = current[projectStart]?.id
+        return reordered.map((item) => !item.completed && (task.level === 0 || projectIdByTaskId.get(item.id) === projectId)
+          ? { ...item, manualStartDate: undefined, manualEndDate: undefined }
+          : item)
       }
 
       if (end >= current.length || current[end].level !== task.level) return current
       let nextEnd = end + 1
       while (nextEnd < current.length && current[nextEnd].level > task.level) nextEnd += 1
       const nextBlock = current.slice(end, nextEnd)
-      return [...current.slice(0, start), ...nextBlock, ...currentBlock, ...current.slice(nextEnd)]
+      const reordered = [...current.slice(0, start), ...nextBlock, ...currentBlock, ...current.slice(nextEnd)]
+      let projectStart = start
+      while (projectStart > 0 && current[projectStart].level !== 0) projectStart -= 1
+      const projectId = current[projectStart]?.id
+      return reordered.map((item) => !item.completed && (task.level === 0 || projectIdByTaskId.get(item.id) === projectId)
+        ? { ...item, manualStartDate: undefined, manualEndDate: undefined }
+        : item)
     })
   }
 
@@ -763,22 +799,44 @@ export default function App() {
   }
 
   const updatePlannedDate = (task: Task, field: 'start' | 'end', value: string) => {
+    if (value) {
+      const date = new Date(`${value}T00:00:00`)
+      if (date.getDay() === 0 || date.getDay() === 6 || holidaySet.has(value)) {
+        alert('土日または休日は、タスクの開始日・終了日には設定できません。営業日を選んでください。')
+        return
+      }
+    }
     const taskIndex = taskItems.findIndex((item) => item.id === task.id)
     let targetIds = [task.id]
+    let leafDescendants: Task[] = []
+    let runInParallel = false
     if (parentTaskIds.has(task.id)) {
       let branchEnd = taskIndex + 1
       while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
-      const leafDescendants = taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id))
-      const runInParallel = task.execution ? task.execution === 'parallel' : parallel
+      leafDescendants = taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id))
+      runInParallel = task.execution ? task.execution === 'parallel' : parallel
       targetIds = runInParallel
         ? leafDescendants.map((item) => item.id)
         : [field === 'start' ? leafDescendants[0]?.id ?? task.id : leafDescendants.at(-1)?.id ?? task.id]
     }
     const targetIdSet = new Set(targetIds)
+    const leafIdSet = new Set(leafDescendants.map((item) => item.id))
+    const firstLeafId = leafDescendants[0]?.id
+    const lastLeafId = leafDescendants.at(-1)?.id
+    const parentSchedule = scheduleById.get(task.id)
 
     setTaskItems((current) => current.map((item) => {
-      if (item.id === task.id && !targetIdSet.has(task.id)) {
-        return field === 'start' ? { ...item, manualStartDate: undefined } : { ...item, manualEndDate: undefined }
+      if (item.id === task.id && parentTaskIds.has(task.id)) {
+        return { ...item, manualStartDate: undefined, manualEndDate: undefined }
+      }
+      if (parentTaskIds.has(task.id) && !runInParallel && leafIdSet.has(item.id)) {
+        const manualStartDate = item.id === firstLeafId ? (field === 'start' ? value || undefined : parentSchedule?.startDate) : undefined
+        const manualEndDate = item.id === lastLeafId ? (field === 'end' ? value || undefined : parentSchedule?.endDate) : undefined
+        if (item.id === firstLeafId && item.id === lastLeafId && manualStartDate && manualEndDate) {
+          const days = businessDaysInclusive(manualStartDate, manualEndDate, holidaySet)
+          return { ...item, manualStartDate, manualEndDate, days, dayValue: days, unit: 'day' }
+        }
+        return { ...item, manualStartDate, manualEndDate }
       }
       if (!targetIdSet.has(item.id)) return item
       const scheduled = scheduleById.get(item.id)
@@ -809,16 +867,38 @@ export default function App() {
     const taskIndex = taskItems.findIndex((item) => item.id === task.id)
     let branchEnd = taskIndex + 1
     while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
-    const leafIds = new Set(taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id)).map((item) => item.id))
+    const leafTasks = taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id))
+    const leafIds = new Set(leafTasks.map((item) => item.id))
+    const firstLeafId = leafTasks[0]?.id
     const becomesParallel = value === 'parallel' || value === 'default' && parallel
     const start = scheduled?.startDate
-    const end = scheduled?.endDate
     setTaskItems((current) => current.map((item) => {
       if (item.id === task.id) return { ...item, execution }
-      if (!becomesParallel || !start || !end || !leafIds.has(item.id)) return item
-      const days = businessDaysInclusive(start, end, holidaySet)
-      return { ...item, manualStartDate: start, manualEndDate: end, days, dayValue: days, unit: 'day' }
+      if (!leafIds.has(item.id)) return item
+      return {
+        ...item,
+        // Execution mode changes placement only. A child's own effort must
+        // never be overwritten with the parent's aggregate duration.
+        manualStartDate: becomesParallel || item.id === firstLeafId ? start : undefined,
+        manualEndDate: undefined,
+      }
     }))
+  }
+
+  const toggleScheduleExcluded = (task: Task) => {
+    const taskIndex = taskItems.findIndex((item) => item.id === task.id)
+    let branchEnd = taskIndex + 1
+    while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
+    const branchIds = new Set(taskItems.slice(taskIndex, branchEnd).map((item) => item.id))
+    const excluded = !task.scheduleExcluded
+    setTaskItems((current) => current.map((item) => branchIds.has(item.id)
+      ? {
+          ...item,
+          scheduleExcluded: excluded || undefined,
+          manualStartDate: excluded ? undefined : item.manualStartDate,
+          manualEndDate: excluded ? undefined : item.manualEndDate,
+        }
+      : item))
   }
 
   const addHolidayRange = () => {
@@ -997,8 +1077,8 @@ export default function App() {
             const isProjectEnd = !nextTask || nextTask.level === 0
             return (
             <div
-              className={`task-row in-project${isProject ? ' project-row project-start' : ''}${isProjectEnd ? ' project-end' : ''}${isParent && !isProject ? ' parent-task' : ''}${!isParent ? ' leaf-task' : ''}${editingId === task.id ? ' editing' : ''}${selectedTaskIds.has(task.id) ? ' range-selected' : ''}${selectedId === task.id ? ' selected' : ''}${task.completed ? ' completed' : ''}`}
-              style={{ '--task-level': task.level } as CSSProperties}
+              className={`task-row in-project${isProject ? ' project-row project-start' : ''}${isProjectEnd ? ' project-end' : ''}${isParent && !isProject ? ' parent-task' : ''}${!isParent ? ' leaf-task' : ''}${editingId === task.id ? ' editing' : ''}${selectedTaskIds.has(task.id) ? ' range-selected' : ''}${selectedId === task.id ? ' selected' : ''}${task.completed ? ' completed' : ''}${task.scheduleExcluded ? ' schedule-excluded' : ''}`}
+              style={{ '--task-level': task.level, '--project-color': projectColorByTaskId.get(task.id) } as CSSProperties}
               key={task.id}
               onClick={(event) => selectTaskRange(task, event.shiftKey)}
               onKeyDown={(event) => handleSelectedTaskKey(event, task)}
@@ -1056,6 +1136,12 @@ export default function App() {
                     {task.name}
                   </button>
                 )}
+                <button
+                  className={`schedule-toggle${task.scheduleExcluded ? ' excluded' : ''}`}
+                  type="button"
+                  title={task.scheduleExcluded ? 'スケジュール計算へ戻す' : '日付を空にしてスケジュール計算から一時除外'}
+                  onClick={(event) => { event.stopPropagation(); toggleScheduleExcluded(task) }}
+                >{task.scheduleExcluded ? '日程に戻す' : '日程から除外'}</button>
               </div>
               {parentTaskIds.has(task.id) ? <select
                 className="task-execution-select"
@@ -1079,7 +1165,8 @@ export default function App() {
                   type="date"
                   aria-label={`${task.name}の予定開始日`}
                   title="予定開始日。空欄に戻すと自動計算になります"
-                  value={parentTaskIds.has(task.id) ? scheduleById.get(task.id)?.startDate ?? '' : task.manualStartDate ?? task.plannedStartAtCompletion ?? scheduleById.get(task.id)?.startDate ?? ''}
+                  value={task.scheduleExcluded ? '' : parentTaskIds.has(task.id) ? scheduleById.get(task.id)?.startDate ?? '' : task.manualStartDate ?? task.plannedStartAtCompletion ?? scheduleById.get(task.id)?.startDate ?? ''}
+                  disabled={task.scheduleExcluded}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                   onChange={(event) => updatePlannedDate(task, 'start', event.target.value)}
@@ -1092,7 +1179,8 @@ export default function App() {
                   type="date"
                   aria-label={`${task.name}の予定終了日`}
                   title="予定終了日。空欄に戻すと自動計算になります"
-                  value={parentTaskIds.has(task.id) ? scheduleById.get(task.id)?.endDate ?? '' : task.manualEndDate ?? task.plannedEndAtCompletion ?? scheduleById.get(task.id)?.endDate ?? ''}
+                  value={task.scheduleExcluded ? '' : parentTaskIds.has(task.id) ? scheduleById.get(task.id)?.endDate ?? '' : task.manualEndDate ?? task.plannedEndAtCompletion ?? scheduleById.get(task.id)?.endDate ?? ''}
+                  disabled={task.scheduleExcluded}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                   onChange={(event) => updatePlannedDate(task, 'end', event.target.value)}
@@ -1196,6 +1284,8 @@ export default function App() {
                 setHolidayAnchor('')
                 setHolidayRangeAction(null)
               }}>休日編集</button>
+              <button className={hideCompletedProjects ? 'active filter-active' : ''} type="button" aria-pressed={hideCompletedProjects} onClick={() => setHideCompletedProjects((current) => !current)}>完了を隠す</button>
+              <button className={hideFutureProjects ? 'active filter-active' : ''} type="button" aria-pressed={hideFutureProjects} onClick={() => setHideFutureProjects((current) => !current)}>開始前を隠す</button>
             </div>
           </div>
           {viewMode === 'gantt' ? (
@@ -1219,7 +1309,7 @@ export default function App() {
                 const isProjectStart = task.level === 0
                 const isProjectEnd = !nextTask || nextTask.level === 0
                 return (
-                <div className={`gantt-row${isProjectStart ? ' project-start' : ''}${isProjectEnd ? ' project-end' : ''}`} key={task.id} style={{ '--columns': schedule.workdays.length, width: timelineWidth } as React.CSSProperties}>
+                <div className={`gantt-row${isProjectStart ? ' project-start' : ''}${isProjectEnd ? ' project-end' : ''}${selectedId === task.id ? ' selected' : ''}`} key={task.id} style={{ '--columns': schedule.workdays.length, '--project-color': projectColorByTaskId.get(task.id), width: timelineWidth } as React.CSSProperties}>
                   {[...weekStartIndexes].map((index) => (
                     <span className="week-line" key={index} style={{ left: `${(index / schedule.workdays.length) * 100}%` }} />
                   ))}
@@ -1229,8 +1319,14 @@ export default function App() {
                     style={{
                       left: `${(item.start / schedule.workdays.length) * 100}%`,
                       width: `${(item.days / schedule.workdays.length) * 100}%`,
+                      backgroundColor: item.completed ? undefined : projectColorByTaskId.get(task.id),
                     }}
                     aria-label={`${item.name}、${item.days}営業日`}
+                    onClick={() => {
+                      setSelectedId(task.id)
+                      setSelectionAnchorId(task.id)
+                      setSelectedTaskIds(new Set([task.id]))
+                    }}
                   >
                     {!item.parent && item.name}
                   </div>}
@@ -1259,7 +1355,11 @@ export default function App() {
                   </div>
                   <div className="calendar-bars">
                     {week.segments.map(({ task, start, span }) => (
-                      <div className={`calendar-task${task.completed ? ' completed' : ''}`} key={task.id} style={{ gridColumn: `${start} / span ${span}` }} title={task.name}>{task.name}</div>
+                      <div className={`calendar-task${task.completed ? ' completed' : ''}${selectedId === task.id ? ' selected' : ''}`} key={task.id} style={{ gridColumn: `${start} / span ${span}`, backgroundColor: task.completed ? undefined : projectColorByTaskId.get(task.id), borderColor: projectColorByTaskId.get(task.id) }} title={task.name} onClick={() => {
+                        setSelectedId(task.id)
+                        setSelectionAnchorId(task.id)
+                        setSelectedTaskIds(new Set([task.id]))
+                      }}>{task.name}</div>
                     ))}
                   </div>
                 </div>
@@ -1324,6 +1424,7 @@ export default function App() {
                 {projectTasks.map((task) => (
                   <label key={task.id}>
                     <span>{task.name}</span>
+                    <input type="color" aria-label={`${task.name}の色`} value={task.projectColor ?? projectColorByTaskId.get(task.id) ?? '#2563eb'} onChange={(event) => setTaskItems((current) => current.map((item) => item.id === task.id ? { ...item, projectColor: event.target.value } : item))} />
                     <input
                       type="date"
                       value={scheduleById.get(task.id)?.startDate ?? task.projectStartDate ?? ''}
