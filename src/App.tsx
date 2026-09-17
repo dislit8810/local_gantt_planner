@@ -404,6 +404,14 @@ export default function App() {
             }
             return
           }
+          // Browsers may require a fresh user gesture after an application
+          // update. Keep the remembered shared file selected instead of
+          // silently falling back to the installation folder's local data.
+          if (active) {
+            setSharedDataReady(false)
+            setSaveStatus('error')
+          }
+          return
         }
         const response = await fetch('/api/state', { cache: 'no-store' })
         if (!active) return
@@ -863,23 +871,20 @@ export default function App() {
 
   const updateTaskExecution = (task: Task, value: 'default' | 'sequence' | 'parallel') => {
     const execution = value === 'default' ? undefined : value
-    const scheduled = scheduleById.get(task.id)
     const taskIndex = taskItems.findIndex((item) => item.id === task.id)
     let branchEnd = taskIndex + 1
     while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
     const leafTasks = taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id))
     const leafIds = new Set(leafTasks.map((item) => item.id))
-    const firstLeafId = leafTasks[0]?.id
-    const becomesParallel = value === 'parallel' || value === 'default' && parallel
-    const start = scheduled?.startDate
     setTaskItems((current) => current.map((item) => {
       if (item.id === task.id) return { ...item, execution }
       if (!leafIds.has(item.id)) return item
       return {
         ...item,
-        // Execution mode changes placement only. A child's own effort must
-        // never be overwritten with the parent's aggregate duration.
-        manualStartDate: becomesParallel || item.id === firstLeafId ? start : undefined,
+        // Execution mode changes placement only. The scheduler already passes
+        // a common start to parallel children and a rolling start to sequence
+        // children, so copied dates would only block later recalculation.
+        manualStartDate: undefined,
         manualEndDate: undefined,
       }
     }))
@@ -989,6 +994,18 @@ export default function App() {
         }
       }
 
+      if (completed) {
+        // Release placement dates on later unfinished tasks in this project so
+        // an early actual finish can pull the remaining sequence forward.
+        let projectEnd = targetIndex + 1
+        while (projectEnd < next.length && next[projectEnd].level !== 0) projectEnd += 1
+        for (let index = branchEnd; index < projectEnd; index += 1) {
+          if (next[index].completed) continue
+          next[index].manualStartDate = undefined
+          next[index].manualEndDate = undefined
+        }
+      }
+
       // Recalculate every parent from the deepest one upward.
       for (let index = next.length - 2; index >= 0; index -= 1) {
         const level = next[index].level
@@ -1057,7 +1074,9 @@ export default function App() {
         <h1>Schedule App v0.1</h1>
         <div className="header-actions">
           <span className={`save-status ${saveStatus}`} title={sharedJsonName ? `${sharedJsonName}にも自動保存します` : 'このPCの共通ローカルデータを使用します'}>
-            {saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? sharedJsonName ? `${sharedJsonName}に保存済み` : '共通データに保存済み' : '共通データに保存できません'}
+            {rememberedJsonHandle && !sharedJsonHandle
+              ? `${sharedJsonName}へ再接続が必要`
+              : saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? sharedJsonName ? `${sharedJsonName}に保存済み` : '共通データに保存済み' : '共通データに保存できません'}
           </span>
           <label>
             今日
