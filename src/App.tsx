@@ -815,12 +815,14 @@ export default function App() {
       }
     }
     const taskIndex = taskItems.findIndex((item) => item.id === task.id)
+    let recalculationStart = taskIndex + 1
     let targetIds = [task.id]
     let leafDescendants: Task[] = []
     let runInParallel = false
     if (parentTaskIds.has(task.id)) {
       let branchEnd = taskIndex + 1
       while (branchEnd < taskItems.length && taskItems[branchEnd].level > task.level) branchEnd += 1
+      recalculationStart = branchEnd
       leafDescendants = taskItems.slice(taskIndex + 1, branchEnd).filter((item) => !parentTaskIds.has(item.id))
       runInParallel = task.execution ? task.execution === 'parallel' : parallel
       targetIds = runInParallel
@@ -833,7 +835,10 @@ export default function App() {
     const lastLeafId = leafDescendants.at(-1)?.id
     const parentSchedule = scheduleById.get(task.id)
 
-    setTaskItems((current) => current.map((item) => {
+    setTaskItems((current) => current.map((item, index) => {
+      if (index >= recalculationStart && !item.completed) {
+        return { ...item, manualStartDate: undefined, manualEndDate: undefined }
+      }
       if (item.id === task.id && parentTaskIds.has(task.id)) {
         return { ...item, manualStartDate: undefined, manualEndDate: undefined }
       }
